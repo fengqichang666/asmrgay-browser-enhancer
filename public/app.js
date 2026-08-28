@@ -322,6 +322,9 @@
     playerTitle = requireElement("#player-title");
     playerQueue = requireElement("#player-queue");
     playerFavorite = requireElement("#player-favorite");
+    playerMode = requireElement("#player-mode");
+    playerListSummary = requireElement("#player-list-summary");
+    playerQueueList = requireElement("#player-queue-list");
     queue = [];
     queueIndex = -1;
     playbackMode = "single";
@@ -339,10 +342,7 @@
       requireElement("#player-next").addEventListener("click", () => this.playRelative(1));
       this.playerFavorite.addEventListener("click", () => this.toggleCurrentFavorite());
       this.audio.setAttribute("referrerpolicy", "no-referrer");
-      requireElement("#player-mode").addEventListener("change", (event) => {
-        const value = event.target.value;
-        if (value === "single" || value === "loop" || value === "random") this.playbackMode = value;
-      });
+      this.playerMode.addEventListener("click", () => this.togglePlaybackMode());
       this.audio.addEventListener("ended", () => this.handleEnded());
       this.audio.addEventListener("error", () => {
         this.status.textContent = "\u64AD\u653E\u5931\u8D25\uFF1A\u97F3\u9891\u5730\u5740\u4E0D\u53EF\u7528\u6216\u6682\u65F6\u65E0\u6CD5\u8BBF\u95EE";
@@ -511,6 +511,7 @@
       this.playerTitle.textContent = node.title;
       this.refreshPlayerFavorite();
       this.playerQueue.textContent = `${this.queueIndex + 1} / ${this.queue.length}${this.queueIsFavorites ? " \xB7 \u6536\u85CF\u5217\u8868" : " \xB7 \u5F53\u524D\u76EE\u5F55"}`;
+      this.renderQueue();
       this.status.textContent = "\u6B63\u5728\u83B7\u53D6\u64AD\u653E\u5730\u5740\u2026";
       try {
         const mediaUrl = await resolveMediaUrl(node.url, this.sourceOrigin);
@@ -556,7 +557,35 @@
     }
     refreshPlayerFavorite() {
       const node = this.queue[this.queueIndex];
-      this.playerFavorite.textContent = node && this.favorites.has(node.url) ? "\u53D6\u6D88\u6536\u85CF" : "\u6536\u85CF";
+      const active = Boolean(node && this.favorites.has(node.url));
+      this.playerFavorite.textContent = active ? "\u2605" : "\u2606";
+      this.playerFavorite.title = active ? "\u53D6\u6D88\u6536\u85CF" : "\u6536\u85CF";
+      this.playerFavorite.setAttribute("aria-label", active ? "\u53D6\u6D88\u6536\u85CF" : "\u6536\u85CF");
+    }
+    togglePlaybackMode() {
+      this.playbackMode = this.playbackMode === "single" ? "loop" : this.playbackMode === "loop" ? "random" : "single";
+      const labels = { single: "\u5355\u66F2\u64AD\u653E", loop: "\u5217\u8868\u5FAA\u73AF", random: "\u968F\u673A\u64AD\u653E" };
+      const icons = { single: "1\xD7", loop: "\u21BB", random: "\u{1F500}" };
+      this.playerMode.textContent = icons[this.playbackMode];
+      this.playerMode.title = labels[this.playbackMode];
+      this.playerMode.setAttribute("aria-label", labels[this.playbackMode]);
+    }
+    renderQueue() {
+      this.playerListSummary.textContent = `\u5F53\u524D\u64AD\u653E\u5217\u8868\uFF08${this.queue.length}\uFF09`;
+      this.playerQueueList.replaceChildren();
+      for (const [index, node] of this.queue.entries()) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "queue-item";
+        button.dataset.index = String(index);
+        button.dataset.active = String(index === this.queueIndex);
+        button.textContent = `${index + 1}. ${node.title}`;
+        button.addEventListener("click", () => {
+          this.queueIndex = index;
+          void this.loadCurrentTrack(true);
+        });
+        this.playerQueueList.append(button);
+      }
     }
     closePlayer() {
       this.loadRequestId += 1;

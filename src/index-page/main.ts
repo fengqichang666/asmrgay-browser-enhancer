@@ -33,6 +33,9 @@ class IndexViewer {
   private readonly playerTitle = requireElement<HTMLElement>("#player-title");
   private readonly playerQueue = requireElement<HTMLElement>("#player-queue");
   private readonly playerFavorite = requireElement<HTMLButtonElement>("#player-favorite");
+  private readonly playerMode = requireElement<HTMLButtonElement>("#player-mode");
+  private readonly playerListSummary = requireElement<HTMLElement>("#player-list-summary");
+  private readonly playerQueueList = requireElement<HTMLElement>("#player-queue-list");
   private queue: IndexNode[] = [];
   private queueIndex = -1;
   private playbackMode: PlaybackMode = "single";
@@ -51,10 +54,7 @@ class IndexViewer {
     requireElement("#player-next").addEventListener("click", () => this.playRelative(1));
     this.playerFavorite.addEventListener("click", () => this.toggleCurrentFavorite());
     this.audio.setAttribute("referrerpolicy", "no-referrer");
-    requireElement<HTMLSelectElement>("#player-mode").addEventListener("change", (event) => {
-      const value = (event.target as HTMLSelectElement).value;
-      if (value === "single" || value === "loop" || value === "random") this.playbackMode = value;
-    });
+    this.playerMode.addEventListener("click", () => this.togglePlaybackMode());
     this.audio.addEventListener("ended", () => this.handleEnded());
     this.audio.addEventListener("error", () => { this.status.textContent = "播放失败：音频地址不可用或暂时无法访问"; });
     void this.restore();
@@ -213,6 +213,7 @@ class IndexViewer {
     this.playerTitle.textContent = node.title;
     this.refreshPlayerFavorite();
     this.playerQueue.textContent = `${this.queueIndex + 1} / ${this.queue.length}${this.queueIsFavorites ? " · 收藏列表" : " · 当前目录"}`;
+    this.renderQueue();
     this.status.textContent = "正在获取播放地址…";
     try {
       const mediaUrl = await resolveMediaUrl(node.url, this.sourceOrigin);
@@ -256,7 +257,34 @@ class IndexViewer {
 
   private refreshPlayerFavorite(): void {
     const node = this.queue[this.queueIndex];
-    this.playerFavorite.textContent = node && this.favorites.has(node.url) ? "取消收藏" : "收藏";
+    const active = Boolean(node && this.favorites.has(node.url));
+    this.playerFavorite.textContent = active ? "★" : "☆";
+    this.playerFavorite.title = active ? "取消收藏" : "收藏";
+    this.playerFavorite.setAttribute("aria-label", active ? "取消收藏" : "收藏");
+  }
+
+  private togglePlaybackMode(): void {
+    this.playbackMode = this.playbackMode === "single" ? "loop" : this.playbackMode === "loop" ? "random" : "single";
+    const labels: Record<PlaybackMode, string> = { single: "单曲播放", loop: "列表循环", random: "随机播放" };
+    const icons: Record<PlaybackMode, string> = { single: "1×", loop: "↻", random: "🔀" };
+    this.playerMode.textContent = icons[this.playbackMode];
+    this.playerMode.title = labels[this.playbackMode];
+    this.playerMode.setAttribute("aria-label", labels[this.playbackMode]);
+  }
+
+  private renderQueue(): void {
+    this.playerListSummary.textContent = `当前播放列表（${this.queue.length}）`;
+    this.playerQueueList.replaceChildren();
+    for (const [index, node] of this.queue.entries()) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "queue-item";
+      button.dataset.index = String(index);
+      button.dataset.active = String(index === this.queueIndex);
+      button.textContent = `${index + 1}. ${node.title}`;
+      button.addEventListener("click", () => { this.queueIndex = index; void this.loadCurrentTrack(true); });
+      this.playerQueueList.append(button);
+    }
   }
 
   private closePlayer(): void {

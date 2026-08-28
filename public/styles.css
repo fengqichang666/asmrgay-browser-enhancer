@@ -34,6 +34,13 @@ h1 { margin: 0; font-size: 19px; }
 .player-top button { border: 0; background: transparent; font-size: 22px; cursor: pointer; }
 .player audio { display: block; width: 100%; }
 .player-controls { flex-wrap: wrap; margin-top: 8px; }
-.player-controls button, .player-controls select { min-height: 34px; border: 1px solid #bcc5cf; border-radius: 6px; background: #fff; padding: 5px 9px; }
+.player-icon { width: 32px; height: 32px; border: 1px solid #bcc5cf; border-radius: 6px; background: #fff; color: #3f4b56; padding: 0; cursor: pointer; }
+.player-icon:hover, .player-icon:focus-visible { background: #eef5fa; border-color: #1769aa; }
+.player-favorite { color: #939ba3; font-size: 20px; }
+.player-favorite[aria-label="取消收藏"] { color: #d58a00; }
 .player-queue { margin-left: auto; color: #68727d; font-size: 12px; }
+.player-list { margin-top: 8px; border-top: 1px solid #e1e6eb; padding-top: 7px; }
+.player-list summary { cursor: pointer; color: #155f9c; font-size: 13px; }
+.queue-item { display: block; width: 100%; overflow: hidden; border: 0; border-radius: 5px; background: transparent; padding: 7px 8px; color: #34404b; text-align: left; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
+.queue-item:hover, .queue-item[data-active="true"] { background: #edf5fa; color: #155f9c; }
 @media (max-width: 560px) { .header { padding: 10px; } .status { max-width: 55vw; } .search-row select { width: 92px; } .tree-row { min-height: 56px; padding-left: calc(4px + var(--depth) * 15px); } }

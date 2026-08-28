@@ -20,7 +20,8 @@
     <section id="player" class="player hidden" aria-label="音频播放器">
       <div class="player-top"><strong id="player-title">未选择音频</strong><button id="player-close" type="button" aria-label="关闭播放器">×</button></div>
       <audio id="audio" controls preload="metadata"></audio>
-      <div class="player-controls"><button id="player-prev" type="button">上一首</button><button id="player-next" type="button">下一首</button><select id="player-mode" aria-label="播放模式"><option value="single">单曲播放</option><option value="loop">列表循环</option><option value="random">随机播放</option></select><button id="player-favorite" type="button">收藏</button><span id="player-queue" class="player-queue"></span></div>
+      <div class="player-controls"><button id="player-prev" class="player-icon" type="button" aria-label="上一首" title="上一首">⏮</button><button id="player-next" class="player-icon" type="button" aria-label="下一首" title="下一首">⏭</button><button id="player-mode" class="player-icon" type="button" aria-label="单曲播放" title="单曲播放">1×</button><button id="player-favorite" class="player-icon player-favorite" type="button" aria-label="收藏" title="收藏">☆</button><span id="player-queue" class="player-queue"></span></div>
+      <details id="player-list" class="player-list"><summary id="player-list-summary">当前播放列表</summary><div id="player-queue-list"></div></details>
     </section>
   </main>
   <script src="./app.js" defer></script>
