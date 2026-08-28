@@ -1,0 +1,30 @@
+:root { color-scheme: light; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; color: #20242a; background: #f3f5f7; }
+* { box-sizing: border-box; }
+body { margin: 0; min-height: 100vh; }
+button, input, select { font: inherit; }
+.app { width: min(920px, 100%); min-height: 100vh; margin: 0 auto; background: #fff; }
+.header { position: sticky; top: 0; z-index: 5; padding: 12px; background: rgba(255,255,255,.96); border-bottom: 1px solid #dfe4e8; backdrop-filter: blur(10px); }
+.title-row, .toolbar, .search-row { display: flex; align-items: center; gap: 8px; }
+.title-row { justify-content: space-between; margin-bottom: 9px; }
+h1 { margin: 0; font-size: 19px; }
+.status { min-width: 0; color: #68727d; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.toolbar { flex-wrap: wrap; }
+.toolbar button { border: 0; border-radius: 7px; background: #1769aa; color: #fff; padding: 8px 12px; }
+.toolbar select, .search-row input, .search-row select { min-height: 38px; border: 1px solid #bcc5cf; border-radius: 7px; background: #fff; padding: 7px 9px; }
+.search-row { margin-top: 9px; }
+.search-row input { flex: 1; min-width: 0; }
+.count { white-space: nowrap; color: #5d6670; font-size: 13px; }
+.tree { padding-bottom: 30px; }
+.tree-row { --depth: 0; display: grid; grid-template-columns: 34px minmax(0, 1fr) 42px; align-items: center; min-height: 58px; padding: 5px 8px 5px calc(8px + var(--depth) * 19px); border-bottom: 1px solid #e7eaed; content-visibility: auto; contain-intrinsic-size: 58px; }
+.tree-row:hover { background: #f3f7fa; }
+.toggle, .favorite { border: 0; background: transparent; cursor: pointer; }
+.toggle { width: 34px; height: 40px; color: #64717d; font-size: 18px; }
+.toggle:disabled { cursor: default; }
+.tree-row a { min-width: 0; color: #155f9c; text-decoration: none; }
+.name, .meta { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.meta { color: #7a838d; font-size: 12px; }
+.favorite { width: 40px; height: 40px; color: #939ba3; font-size: 23px; }
+.favorite[data-active="true"] { color: #d58a00; }
+.empty { padding: 48px 20px; text-align: center; color: #6e7781; }
+.hidden { display: none; }
+@media (max-width: 560px) { .header { padding: 10px; } .status { max-width: 55vw; } .search-row select { width: 92px; } .tree-row { min-height: 56px; padding-left: calc(4px + var(--depth) * 15px); } }
