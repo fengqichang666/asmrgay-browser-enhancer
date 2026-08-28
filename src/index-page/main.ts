@@ -50,6 +50,7 @@ class IndexViewer {
     requireElement("#player-prev").addEventListener("click", () => this.playRelative(-1));
     requireElement("#player-next").addEventListener("click", () => this.playRelative(1));
     this.playerFavorite.addEventListener("click", () => this.toggleCurrentFavorite());
+    this.audio.setAttribute("referrerpolicy", "no-referrer");
     requireElement<HTMLSelectElement>("#player-mode").addEventListener("change", (event) => {
       const value = (event.target as HTMLSelectElement).value;
       if (value === "single" || value === "loop" || value === "random") this.playbackMode = value;
