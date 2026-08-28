@@ -47,7 +47,7 @@ export const PANEL_STYLES = `
   .abe-tree-loading { height: 49px; padding-top: 14px; padding-right: 14px; border-bottom: 1px solid #e0e5ea; background: #fafbfc; color: #69717c; }
   .abe-tree-error { color: #a13b35; background: #fff6f5; padding-top: 14px; }
   .abe-tree-error:hover { background: #fbeae8; }
-  .abe-list { overflow: auto; padding: 6px 0; }
+  .abe-list { overflow: auto; overflow-anchor: none; padding: 6px 0; }
   .abe-empty { padding: 32px 20px; text-align: center; color: #69717c; }
   .abe-row { display: grid; grid-template-columns: 28px minmax(0,1fr) 68px; align-items: center; min-height: 48px; padding: 4px 10px 4px 14px; border-bottom: 1px solid #e5e8ec; background: #fff; content-visibility: auto; contain-intrinsic-size: 48px; }
   .abe-row:hover { background: #f0f5f9; }

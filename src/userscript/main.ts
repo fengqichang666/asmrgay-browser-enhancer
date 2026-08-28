@@ -215,11 +215,13 @@ class OnDemandPanel {
   }
 
   private renderWindow(): void {
+    const scrollTop = this.list.scrollTop;
     this.list.replaceChildren();
-    if (!this.visibleRows.length) { const empty = document.createElement("div"); empty.className = "abe-empty"; empty.textContent = this.entries.length ? "没有匹配条目" : "展开目录后建立索引"; this.list.append(empty); return; }
+    if (!this.visibleRows.length) { const empty = document.createElement("div"); empty.className = "abe-empty"; empty.textContent = this.entries.length ? "没有匹配条目" : "展开目录后建立索引"; this.list.append(empty); this.list.scrollTop = scrollTop; return; }
     const fragment = document.createDocumentFragment();
     for (const row of this.visibleRows) fragment.append(this.createTreeRow(row));
     this.list.append(fragment);
+    this.list.scrollTop = scrollTop;
   }
 
   private renderBreadcrumbs(): void {

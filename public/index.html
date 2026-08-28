@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#1769aa">
+  <title>ASMRGay 本地索引</title>
+  <link rel="manifest" href="./manifest.json">
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <main class="app">
+    <header class="header">
+      <div class="title-row"><h1>本地目录索引</h1><span id="status" class="status">不会访问网站 API</span></div>
+      <div class="toolbar"><button id="import" type="button">导入 index.json</button><select id="mode" aria-label="导入模式"><option value="merge">合并导入</option><option value="replace">替换导入</option></select><input id="file" class="hidden" type="file" accept="application/json,.json"></div>
+      <div class="search-row"><input id="search" type="search" placeholder="搜索已导入内容"><select id="filter"><option value="all">全部</option><option value="directory">目录</option><option value="content">文件</option><option value="favorite">收藏</option></select><span id="count" class="count">0 项</span></div>
+    </header>
+    <section id="tree" class="tree" aria-live="polite"></section>
+  </main>
+  <script src="./app.js" defer></script>
+</body>
+</html>

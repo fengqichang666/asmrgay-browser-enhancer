@@ -568,7 +568,7 @@
   .abe-tree-loading { height: 49px; padding-top: 14px; padding-right: 14px; border-bottom: 1px solid #e0e5ea; background: #fafbfc; color: #69717c; }
   .abe-tree-error { color: #a13b35; background: #fff6f5; padding-top: 14px; }
   .abe-tree-error:hover { background: #fbeae8; }
-  .abe-list { overflow: auto; padding: 6px 0; }
+  .abe-list { overflow: auto; overflow-anchor: none; padding: 6px 0; }
   .abe-empty { padding: 32px 20px; text-align: center; color: #69717c; }
   .abe-row { display: grid; grid-template-columns: 28px minmax(0,1fr) 68px; align-items: center; min-height: 48px; padding: 4px 10px 4px 14px; border-bottom: 1px solid #e5e8ec; background: #fff; content-visibility: auto; contain-intrinsic-size: 48px; }
   .abe-row:hover { background: #f0f5f9; }
@@ -809,17 +809,20 @@
       return rows;
     }
     renderWindow() {
+      const scrollTop = this.list.scrollTop;
       this.list.replaceChildren();
       if (!this.visibleRows.length) {
         const empty = document.createElement("div");
         empty.className = "abe-empty";
         empty.textContent = this.entries.length ? "\u6CA1\u6709\u5339\u914D\u6761\u76EE" : "\u5C55\u5F00\u76EE\u5F55\u540E\u5EFA\u7ACB\u7D22\u5F15";
         this.list.append(empty);
+        this.list.scrollTop = scrollTop;
         return;
       }
       const fragment = document.createDocumentFragment();
       for (const row of this.visibleRows) fragment.append(this.createTreeRow(row));
       this.list.append(fragment);
+      this.list.scrollTop = scrollTop;
     }
     renderBreadcrumbs() {
       const container = this.requireElement(".abe-breadcrumbs");
