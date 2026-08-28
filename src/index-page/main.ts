@@ -37,6 +37,7 @@ class IndexViewer {
   private queueIndex = -1;
   private playbackMode: PlaybackMode = "single";
   private queueIsFavorites = false;
+  private loadRequestId = 0;
 
   constructor() {
     requireElement("#import").addEventListener("click", () => this.file.click());
@@ -198,25 +199,38 @@ class IndexViewer {
     this.queue = queue;
     this.queueIndex = Math.max(0, queue.findIndex((node) => node.url === url));
     this.player.classList.remove("hidden");
-    this.loadCurrentTrack(true);
+    void this.loadCurrentTrack(true);
   }
 
-  private loadCurrentTrack(autoplay: boolean): void {
+  private async loadCurrentTrack(autoplay: boolean): Promise<void> {
     const node = this.queue[this.queueIndex];
     if (!node) return;
-    this.audio.src = node.url;
+    const requestId = ++this.loadRequestId;
+    this.audio.pause();
+    this.audio.removeAttribute("src");
     this.audio.load();
     this.playerTitle.textContent = node.title;
     this.refreshPlayerFavorite();
     this.playerQueue.textContent = `${this.queueIndex + 1} / ${this.queue.length}${this.queueIsFavorites ? " · 收藏列表" : " · 当前目录"}`;
-    if (autoplay) void this.audio.play().catch(() => { this.status.textContent = "请点击播放器的播放按钮开始播放"; });
+    this.status.textContent = "正在获取播放地址…";
+    try {
+      const mediaUrl = await resolveMediaUrl(node.url, this.sourceOrigin);
+      if (requestId !== this.loadRequestId) return;
+      this.audio.src = mediaUrl;
+      this.audio.load();
+      this.status.textContent = "播放地址已就绪";
+      if (autoplay) void this.audio.play().catch(() => { this.status.textContent = "请点击播放器的播放按钮开始播放"; });
+    } catch (error) {
+      if (requestId !== this.loadRequestId) return;
+      this.status.textContent = error instanceof Error ? `播放地址获取失败：${error.message}` : "播放地址获取失败";
+    }
   }
 
   private playRelative(offset: number): void {
     if (!this.queue.length) return;
     if (this.playbackMode === "random") this.queueIndex = randomIndex(this.queue.length, this.queueIndex);
     else this.queueIndex = (this.queueIndex + offset + this.queue.length) % this.queue.length;
-    this.loadCurrentTrack(true);
+    void this.loadCurrentTrack(true);
   }
 
   private handleEnded(): void {
@@ -232,7 +246,7 @@ class IndexViewer {
       const next = this.queue[(this.queueIndex + 1) % this.queue.length]?.url;
       this.queue = this.queue.filter((item) => item.url !== node.url);
       if (!this.queue.length) this.closePlayer();
-      else { this.queueIndex = Math.max(0, this.queue.findIndex((item) => item.url === next)); this.loadCurrentTrack(false); }
+      else { this.queueIndex = Math.max(0, this.queue.findIndex((item) => item.url === next)); void this.loadCurrentTrack(false); }
     }
     this.refreshPlayerFavorite();
     void this.persist();
@@ -245,6 +259,7 @@ class IndexViewer {
   }
 
   private closePlayer(): void {
+    this.loadRequestId += 1;
     this.audio.pause();
     this.audio.removeAttribute("src");
     this.audio.load();
@@ -282,6 +297,14 @@ function encodePath(path: string): string { return path.split("/").map((segment)
 function emptyState(message: string): HTMLElement { const element = document.createElement("div"); element.className = "empty"; element.textContent = message; return element; }
 function requireElement<T extends Element = HTMLElement>(selector: string): T { const element = document.querySelector<T>(selector); if (!element) throw new Error(`Missing element: ${selector}`); return element; }
 function randomIndex(length: number, current: number): number { if (length < 2) return current; let next = current; while (next === current) next = Math.floor(Math.random() * length); return next; }
+async function resolveMediaUrl(fileUrl: string, sourceOrigin: string): Promise<string> {
+  const path = decodeURIComponent(new URL(fileUrl).pathname);
+  const response = await fetch(`${sourceOrigin}/api/fs/get`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ path, password: "" }) });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  const payload = await response.json() as { code?: number; message?: string; data?: { raw_url?: string } };
+  if (payload.code !== 200 || !payload.data?.raw_url) throw new Error(payload.message || "接口未返回音频地址");
+  return payload.data.raw_url;
+}
 
 function openDatabase(): Promise<IDBDatabase> { return new Promise((resolve, reject) => { const request = indexedDB.open("asmrgay-index-viewer", 1); request.onupgradeneeded = () => { if (!request.result.objectStoreNames.contains("state")) request.result.createObjectStore("state"); }; request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error); }); }
 async function loadState(): Promise<ViewerState | undefined> { const database = await openDatabase(); try { return await new Promise((resolve, reject) => { const request = database.transaction("state").objectStore("state").get(STATE_KEY); request.onsuccess = () => resolve(request.result as ViewerState | undefined); request.onerror = () => reject(request.error); }); } finally { database.close(); } }
