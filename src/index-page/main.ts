@@ -34,6 +34,8 @@ class IndexViewer {
   private readonly playerQueue = requireElement<HTMLElement>("#player-queue");
   private readonly playerFavorite = requireElement<HTMLButtonElement>("#player-favorite");
   private readonly playerMode = requireElement<HTMLButtonElement>("#player-mode");
+  private readonly playerListButton = requireElement<HTMLButtonElement>("#player-list-button");
+  private readonly queueDialog = requireElement<HTMLDialogElement>("#queue-dialog");
   private readonly playerListSummary = requireElement<HTMLElement>("#player-list-summary");
   private readonly playerQueueList = requireElement<HTMLElement>("#player-queue-list");
   private queue: IndexNode[] = [];
@@ -55,6 +57,8 @@ class IndexViewer {
     this.playerFavorite.addEventListener("click", () => this.toggleCurrentFavorite());
     this.audio.setAttribute("referrerpolicy", "no-referrer");
     this.playerMode.addEventListener("click", () => this.togglePlaybackMode());
+    this.playerListButton.addEventListener("click", () => { if (!this.queueDialog.open) this.queueDialog.showModal(); });
+    requireElement<HTMLButtonElement>("#queue-dialog-close").addEventListener("click", () => this.queueDialog.close());
     this.audio.addEventListener("ended", () => this.handleEnded());
     this.audio.addEventListener("error", () => { this.status.textContent = "播放失败：音频地址不可用或暂时无法访问"; });
     void this.restore();
@@ -292,6 +296,7 @@ class IndexViewer {
     this.audio.pause();
     this.audio.removeAttribute("src");
     this.audio.load();
+    if (this.queueDialog.open) this.queueDialog.close();
     this.player.classList.add("hidden");
   }
 

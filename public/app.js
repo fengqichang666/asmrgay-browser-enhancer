@@ -323,6 +323,8 @@
     playerQueue = requireElement("#player-queue");
     playerFavorite = requireElement("#player-favorite");
     playerMode = requireElement("#player-mode");
+    playerListButton = requireElement("#player-list-button");
+    queueDialog = requireElement("#queue-dialog");
     playerListSummary = requireElement("#player-list-summary");
     playerQueueList = requireElement("#player-queue-list");
     queue = [];
@@ -343,6 +345,10 @@
       this.playerFavorite.addEventListener("click", () => this.toggleCurrentFavorite());
       this.audio.setAttribute("referrerpolicy", "no-referrer");
       this.playerMode.addEventListener("click", () => this.togglePlaybackMode());
+      this.playerListButton.addEventListener("click", () => {
+        if (!this.queueDialog.open) this.queueDialog.showModal();
+      });
+      requireElement("#queue-dialog-close").addEventListener("click", () => this.queueDialog.close());
       this.audio.addEventListener("ended", () => this.handleEnded());
       this.audio.addEventListener("error", () => {
         this.status.textContent = "\u64AD\u653E\u5931\u8D25\uFF1A\u97F3\u9891\u5730\u5740\u4E0D\u53EF\u7528\u6216\u6682\u65F6\u65E0\u6CD5\u8BBF\u95EE";
@@ -592,6 +598,7 @@
       this.audio.pause();
       this.audio.removeAttribute("src");
       this.audio.load();
+      if (this.queueDialog.open) this.queueDialog.close();
       this.player.classList.add("hidden");
     }
     async restore() {
