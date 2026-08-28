@@ -317,12 +317,34 @@
     filter = requireElement("#filter");
     file = requireElement("#file");
     mode = requireElement("#mode");
+    player = requireElement("#player");
+    audio = requireElement("#audio");
+    playerTitle = requireElement("#player-title");
+    playerQueue = requireElement("#player-queue");
+    playerFavorite = requireElement("#player-favorite");
+    queue = [];
+    queueIndex = -1;
+    playbackMode = "single";
+    queueIsFavorites = false;
     constructor() {
       requireElement("#import").addEventListener("click", () => this.file.click());
       this.file.addEventListener("change", (event) => void this.importFile(event));
       this.search.addEventListener("input", () => this.render());
       this.filter.addEventListener("change", () => this.render());
       this.tree.addEventListener("click", (event) => this.handleTreeClick(event));
+      requireElement("#play-favorites").addEventListener("click", () => this.playFavorites());
+      requireElement("#player-close").addEventListener("click", () => this.closePlayer());
+      requireElement("#player-prev").addEventListener("click", () => this.playRelative(-1));
+      requireElement("#player-next").addEventListener("click", () => this.playRelative(1));
+      this.playerFavorite.addEventListener("click", () => this.toggleCurrentFavorite());
+      requireElement("#player-mode").addEventListener("change", (event) => {
+        const value = event.target.value;
+        if (value === "single" || value === "loop" || value === "random") this.playbackMode = value;
+      });
+      this.audio.addEventListener("ended", () => this.handleEnded());
+      this.audio.addEventListener("error", () => {
+        this.status.textContent = "\u64AD\u653E\u5931\u8D25\uFF1A\u97F3\u9891\u5730\u5740\u4E0D\u53EF\u7528\u6216\u6682\u65F6\u65E0\u6CD5\u8BBF\u95EE";
+      });
       void this.restore();
       if ("serviceWorker" in navigator && location.protocol.startsWith("http")) void navigator.serviceWorker.register("./service-worker.js");
     }
@@ -363,6 +385,7 @@
         const url2 = favoriteButton.dataset.favorite;
         if (this.favorites.has(url2)) this.favorites.delete(url2);
         else this.favorites.add(url2);
+        this.refreshPlayerFavorite();
         void this.persist();
         this.render();
         return;
@@ -428,8 +451,10 @@
       else toggle.disabled = true;
       const link = document.createElement("a");
       link.href = url;
-      link.target = "_blank";
-      link.rel = "noopener noreferrer";
+      if (type === "directory") {
+        link.target = "_blank";
+        link.rel = "noopener noreferrer";
+      }
       const name = document.createElement("span");
       name.className = "name";
       name.textContent = title;
@@ -437,6 +462,10 @@
       meta.className = "meta";
       meta.textContent = type === "directory" ? "\u76EE\u5F55" : "\u6587\u4EF6";
       link.append(name, meta);
+      if (type === "content") link.addEventListener("click", (event) => {
+        event.preventDefault();
+        this.playTrack(url);
+      });
       const favorite = document.createElement("button");
       favorite.type = "button";
       favorite.className = "favorite";
@@ -446,6 +475,79 @@
       favorite.title = this.favorites.has(url) ? "\u53D6\u6D88\u6536\u85CF" : "\u6536\u85CF";
       row.append(toggle, link, favorite);
       return row;
+    }
+    playTrack(url) {
+      const node = this.graph.nodes.get(url);
+      if (!node || node.type !== "content") return;
+      const parent = [...this.graph.edges.values()].find((edge) => edge.childId === url)?.parentId;
+      const queue = parent ? childrenOf(this.graph, parent).filter((item) => item.type === "content" && item.status === "active") : [node];
+      this.queueIsFavorites = false;
+      this.setQueue(queue.length ? queue : [node], url);
+    }
+    playFavorites() {
+      const queue = [...this.graph.nodes.values()].filter((node) => node.type === "content" && node.status === "active" && this.favorites.has(node.url));
+      if (!queue.length) {
+        this.status.textContent = "\u6682\u65E0\u6536\u85CF\u97F3\u9891";
+        return;
+      }
+      this.queueIsFavorites = true;
+      this.setQueue(queue, queue[0].url);
+    }
+    setQueue(queue, url) {
+      this.queue = queue;
+      this.queueIndex = Math.max(0, queue.findIndex((node) => node.url === url));
+      this.player.classList.remove("hidden");
+      this.loadCurrentTrack(true);
+    }
+    loadCurrentTrack(autoplay) {
+      const node = this.queue[this.queueIndex];
+      if (!node) return;
+      this.audio.src = node.url;
+      this.audio.load();
+      this.playerTitle.textContent = node.title;
+      this.refreshPlayerFavorite();
+      this.playerQueue.textContent = `${this.queueIndex + 1} / ${this.queue.length}${this.queueIsFavorites ? " \xB7 \u6536\u85CF\u5217\u8868" : " \xB7 \u5F53\u524D\u76EE\u5F55"}`;
+      if (autoplay) void this.audio.play().catch(() => {
+        this.status.textContent = "\u8BF7\u70B9\u51FB\u64AD\u653E\u5668\u7684\u64AD\u653E\u6309\u94AE\u5F00\u59CB\u64AD\u653E";
+      });
+    }
+    playRelative(offset) {
+      if (!this.queue.length) return;
+      if (this.playbackMode === "random") this.queueIndex = randomIndex(this.queue.length, this.queueIndex);
+      else this.queueIndex = (this.queueIndex + offset + this.queue.length) % this.queue.length;
+      this.loadCurrentTrack(true);
+    }
+    handleEnded() {
+      if (this.playbackMode === "single") return;
+      this.playRelative(1);
+    }
+    toggleCurrentFavorite() {
+      const node = this.queue[this.queueIndex];
+      if (!node) return;
+      if (this.favorites.has(node.url)) this.favorites.delete(node.url);
+      else this.favorites.add(node.url);
+      if (this.queueIsFavorites && !this.favorites.has(node.url)) {
+        const next = this.queue[(this.queueIndex + 1) % this.queue.length]?.url;
+        this.queue = this.queue.filter((item) => item.url !== node.url);
+        if (!this.queue.length) this.closePlayer();
+        else {
+          this.queueIndex = Math.max(0, this.queue.findIndex((item) => item.url === next));
+          this.loadCurrentTrack(false);
+        }
+      }
+      this.refreshPlayerFavorite();
+      void this.persist();
+      this.render();
+    }
+    refreshPlayerFavorite() {
+      const node = this.queue[this.queueIndex];
+      this.playerFavorite.textContent = node && this.favorites.has(node.url) ? "\u53D6\u6D88\u6536\u85CF" : "\u6536\u85CF";
+    }
+    closePlayer() {
+      this.audio.pause();
+      this.audio.removeAttribute("src");
+      this.audio.load();
+      this.player.classList.add("hidden");
     }
     async restore() {
       try {
@@ -493,6 +595,12 @@
     const element = document.querySelector(selector);
     if (!element) throw new Error(`Missing element: ${selector}`);
     return element;
+  }
+  function randomIndex(length, current) {
+    if (length < 2) return current;
+    let next = current;
+    while (next === current) next = Math.floor(Math.random() * length);
+    return next;
   }
   function openDatabase() {
     return new Promise((resolve, reject) => {
