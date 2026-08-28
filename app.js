@@ -326,6 +326,7 @@
     queueIndex = -1;
     playbackMode = "single";
     queueIsFavorites = false;
+    loadRequestId = 0;
     constructor() {
       requireElement("#import").addEventListener("click", () => this.file.click());
       this.file.addEventListener("change", (event) => void this.importFile(event));
@@ -497,25 +498,38 @@
       this.queue = queue;
       this.queueIndex = Math.max(0, queue.findIndex((node) => node.url === url));
       this.player.classList.remove("hidden");
-      this.loadCurrentTrack(true);
+      void this.loadCurrentTrack(true);
     }
-    loadCurrentTrack(autoplay) {
+    async loadCurrentTrack(autoplay) {
       const node = this.queue[this.queueIndex];
       if (!node) return;
-      this.audio.src = node.url;
+      const requestId = ++this.loadRequestId;
+      this.audio.pause();
+      this.audio.removeAttribute("src");
       this.audio.load();
       this.playerTitle.textContent = node.title;
       this.refreshPlayerFavorite();
       this.playerQueue.textContent = `${this.queueIndex + 1} / ${this.queue.length}${this.queueIsFavorites ? " \xB7 \u6536\u85CF\u5217\u8868" : " \xB7 \u5F53\u524D\u76EE\u5F55"}`;
-      if (autoplay) void this.audio.play().catch(() => {
-        this.status.textContent = "\u8BF7\u70B9\u51FB\u64AD\u653E\u5668\u7684\u64AD\u653E\u6309\u94AE\u5F00\u59CB\u64AD\u653E";
-      });
+      this.status.textContent = "\u6B63\u5728\u83B7\u53D6\u64AD\u653E\u5730\u5740\u2026";
+      try {
+        const mediaUrl = await resolveMediaUrl(node.url, this.sourceOrigin);
+        if (requestId !== this.loadRequestId) return;
+        this.audio.src = mediaUrl;
+        this.audio.load();
+        this.status.textContent = "\u64AD\u653E\u5730\u5740\u5DF2\u5C31\u7EEA";
+        if (autoplay) void this.audio.play().catch(() => {
+          this.status.textContent = "\u8BF7\u70B9\u51FB\u64AD\u653E\u5668\u7684\u64AD\u653E\u6309\u94AE\u5F00\u59CB\u64AD\u653E";
+        });
+      } catch (error) {
+        if (requestId !== this.loadRequestId) return;
+        this.status.textContent = error instanceof Error ? `\u64AD\u653E\u5730\u5740\u83B7\u53D6\u5931\u8D25\uFF1A${error.message}` : "\u64AD\u653E\u5730\u5740\u83B7\u53D6\u5931\u8D25";
+      }
     }
     playRelative(offset) {
       if (!this.queue.length) return;
       if (this.playbackMode === "random") this.queueIndex = randomIndex(this.queue.length, this.queueIndex);
       else this.queueIndex = (this.queueIndex + offset + this.queue.length) % this.queue.length;
-      this.loadCurrentTrack(true);
+      void this.loadCurrentTrack(true);
     }
     handleEnded() {
       if (this.playbackMode === "single") return;
@@ -532,7 +546,7 @@
         if (!this.queue.length) this.closePlayer();
         else {
           this.queueIndex = Math.max(0, this.queue.findIndex((item) => item.url === next));
-          this.loadCurrentTrack(false);
+          void this.loadCurrentTrack(false);
         }
       }
       this.refreshPlayerFavorite();
@@ -544,6 +558,7 @@
       this.playerFavorite.textContent = node && this.favorites.has(node.url) ? "\u53D6\u6D88\u6536\u85CF" : "\u6536\u85CF";
     }
     closePlayer() {
+      this.loadRequestId += 1;
       this.audio.pause();
       this.audio.removeAttribute("src");
       this.audio.load();
@@ -601,6 +616,14 @@
     let next = current;
     while (next === current) next = Math.floor(Math.random() * length);
     return next;
+  }
+  async function resolveMediaUrl(fileUrl, sourceOrigin) {
+    const path = decodeURIComponent(new URL(fileUrl).pathname);
+    const response = await fetch(`${sourceOrigin}/api/fs/get`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ path, password: "" }) });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const payload = await response.json();
+    if (payload.code !== 200 || !payload.data?.raw_url) throw new Error(payload.message || "\u63A5\u53E3\u672A\u8FD4\u56DE\u97F3\u9891\u5730\u5740");
+    return payload.data.raw_url;
   }
   function openDatabase() {
     return new Promise((resolve, reject) => {
