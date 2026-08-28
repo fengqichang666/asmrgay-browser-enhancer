@@ -346,7 +346,7 @@
         this.status.textContent = "\u64AD\u653E\u5931\u8D25\uFF1A\u97F3\u9891\u5730\u5740\u4E0D\u53EF\u7528\u6216\u6682\u65F6\u65E0\u6CD5\u8BBF\u95EE";
       });
       void this.restore();
-      if ("serviceWorker" in navigator && location.protocol.startsWith("http")) void navigator.serviceWorker.register("./service-worker.js");
+      if ("serviceWorker" in navigator && location.protocol.startsWith("http")) void navigator.serviceWorker.register("./service-worker.js", { updateViaCache: "none" });
     }
     async importFile(event) {
       const input = event.target;

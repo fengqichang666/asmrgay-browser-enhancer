@@ -56,7 +56,7 @@ class IndexViewer {
     this.audio.addEventListener("ended", () => this.handleEnded());
     this.audio.addEventListener("error", () => { this.status.textContent = "播放失败：音频地址不可用或暂时无法访问"; });
     void this.restore();
-    if ("serviceWorker" in navigator && location.protocol.startsWith("http")) void navigator.serviceWorker.register("./service-worker.js");
+    if ("serviceWorker" in navigator && location.protocol.startsWith("http")) void navigator.serviceWorker.register("./service-worker.js", { updateViaCache: "none" });
   }
 
   private async importFile(event: Event): Promise<void> {
