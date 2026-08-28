@@ -27,4 +27,13 @@ h1 { margin: 0; font-size: 19px; }
 .favorite[data-active="true"] { color: #d58a00; }
 .empty { padding: 48px 20px; text-align: center; color: #6e7781; }
 .hidden { display: none; }
+.player { position: fixed; z-index: 10; right: 12px; bottom: 12px; left: 12px; margin: 0 auto; width: min(896px, calc(100% - 24px)); padding: 12px; border: 1px solid #cbd5df; border-radius: 10px; background: rgba(255,255,255,.98); box-shadow: 0 5px 24px rgba(0,0,0,.18); }
+.player-top, .player-controls { display: flex; align-items: center; gap: 8px; }
+.player-top { justify-content: space-between; margin-bottom: 7px; }
+.player-top strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.player-top button { border: 0; background: transparent; font-size: 22px; cursor: pointer; }
+.player audio { display: block; width: 100%; }
+.player-controls { flex-wrap: wrap; margin-top: 8px; }
+.player-controls button, .player-controls select { min-height: 34px; border: 1px solid #bcc5cf; border-radius: 6px; background: #fff; padding: 5px 9px; }
+.player-queue { margin-left: auto; color: #68727d; font-size: 12px; }
 @media (max-width: 560px) { .header { padding: 10px; } .status { max-width: 55vw; } .search-row select { width: 92px; } .tree-row { min-height: 56px; padding-left: calc(4px + var(--depth) * 15px); } }

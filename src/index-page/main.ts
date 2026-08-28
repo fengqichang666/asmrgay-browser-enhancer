@@ -1,10 +1,11 @@
 import { childrenOf, createGraph, graphEntries, hydrateGraph, mergeEntries, serializeGraph } from "../core/graph.js";
-import type { IndexGraph, SerializedGraph } from "../core/graph.js";
+import type { IndexGraph, IndexNode, SerializedGraph } from "../core/graph.js";
 import { parseIndexExport } from "../core/schema.js";
 
 const SOURCE_ORIGIN = "https://www.asmrgay.com";
 const STATE_KEY = "viewer-state";
 const MAX_SEARCH_RESULTS = 300;
+type PlaybackMode = "single" | "loop" | "random";
 
 interface ViewerState {
   sourceOrigin: string;
@@ -27,6 +28,15 @@ class IndexViewer {
   private readonly filter = requireElement<HTMLSelectElement>("#filter");
   private readonly file = requireElement<HTMLInputElement>("#file");
   private readonly mode = requireElement<HTMLSelectElement>("#mode");
+  private readonly player = requireElement<HTMLElement>("#player");
+  private readonly audio = requireElement<HTMLAudioElement>("#audio");
+  private readonly playerTitle = requireElement<HTMLElement>("#player-title");
+  private readonly playerQueue = requireElement<HTMLElement>("#player-queue");
+  private readonly playerFavorite = requireElement<HTMLButtonElement>("#player-favorite");
+  private queue: IndexNode[] = [];
+  private queueIndex = -1;
+  private playbackMode: PlaybackMode = "single";
+  private queueIsFavorites = false;
 
   constructor() {
     requireElement("#import").addEventListener("click", () => this.file.click());
@@ -34,6 +44,17 @@ class IndexViewer {
     this.search.addEventListener("input", () => this.render());
     this.filter.addEventListener("change", () => this.render());
     this.tree.addEventListener("click", (event) => this.handleTreeClick(event));
+    requireElement("#play-favorites").addEventListener("click", () => this.playFavorites());
+    requireElement("#player-close").addEventListener("click", () => this.closePlayer());
+    requireElement("#player-prev").addEventListener("click", () => this.playRelative(-1));
+    requireElement("#player-next").addEventListener("click", () => this.playRelative(1));
+    this.playerFavorite.addEventListener("click", () => this.toggleCurrentFavorite());
+    requireElement<HTMLSelectElement>("#player-mode").addEventListener("change", (event) => {
+      const value = (event.target as HTMLSelectElement).value;
+      if (value === "single" || value === "loop" || value === "random") this.playbackMode = value;
+    });
+    this.audio.addEventListener("ended", () => this.handleEnded());
+    this.audio.addEventListener("error", () => { this.status.textContent = "播放失败：音频地址不可用或暂时无法访问"; });
     void this.restore();
     if ("serviceWorker" in navigator && location.protocol.startsWith("http")) void navigator.serviceWorker.register("./service-worker.js");
   }
@@ -75,6 +96,7 @@ class IndexViewer {
     if (favoriteButton?.dataset.favorite) {
       const url = favoriteButton.dataset.favorite;
       if (this.favorites.has(url)) this.favorites.delete(url); else this.favorites.add(url);
+      this.refreshPlayerFavorite();
       void this.persist();
       this.render();
       return;
@@ -140,11 +162,11 @@ class IndexViewer {
     if (type === "directory") toggle.dataset.toggle = url; else toggle.disabled = true;
     const link = document.createElement("a");
     link.href = url;
-    link.target = "_blank";
-    link.rel = "noopener noreferrer";
+    if (type === "directory") { link.target = "_blank"; link.rel = "noopener noreferrer"; }
     const name = document.createElement("span"); name.className = "name"; name.textContent = title;
     const meta = document.createElement("span"); meta.className = "meta"; meta.textContent = type === "directory" ? "目录" : "文件";
     link.append(name, meta);
+    if (type === "content") link.addEventListener("click", (event) => { event.preventDefault(); this.playTrack(url); });
     const favorite = document.createElement("button");
     favorite.type = "button";
     favorite.className = "favorite";
@@ -154,6 +176,79 @@ class IndexViewer {
     favorite.title = this.favorites.has(url) ? "取消收藏" : "收藏";
     row.append(toggle, link, favorite);
     return row;
+  }
+
+  private playTrack(url: string): void {
+    const node = this.graph.nodes.get(url);
+    if (!node || node.type !== "content") return;
+    const parent = [...this.graph.edges.values()].find((edge) => edge.childId === url)?.parentId;
+    const queue = parent ? childrenOf(this.graph, parent).filter((item) => item.type === "content" && item.status === "active") : [node];
+    this.queueIsFavorites = false;
+    this.setQueue(queue.length ? queue : [node], url);
+  }
+
+  private playFavorites(): void {
+    const queue = [...this.graph.nodes.values()].filter((node) => node.type === "content" && node.status === "active" && this.favorites.has(node.url));
+    if (!queue.length) { this.status.textContent = "暂无收藏音频"; return; }
+    this.queueIsFavorites = true;
+    this.setQueue(queue, queue[0]!.url);
+  }
+
+  private setQueue(queue: IndexNode[], url: string): void {
+    this.queue = queue;
+    this.queueIndex = Math.max(0, queue.findIndex((node) => node.url === url));
+    this.player.classList.remove("hidden");
+    this.loadCurrentTrack(true);
+  }
+
+  private loadCurrentTrack(autoplay: boolean): void {
+    const node = this.queue[this.queueIndex];
+    if (!node) return;
+    this.audio.src = node.url;
+    this.audio.load();
+    this.playerTitle.textContent = node.title;
+    this.refreshPlayerFavorite();
+    this.playerQueue.textContent = `${this.queueIndex + 1} / ${this.queue.length}${this.queueIsFavorites ? " · 收藏列表" : " · 当前目录"}`;
+    if (autoplay) void this.audio.play().catch(() => { this.status.textContent = "请点击播放器的播放按钮开始播放"; });
+  }
+
+  private playRelative(offset: number): void {
+    if (!this.queue.length) return;
+    if (this.playbackMode === "random") this.queueIndex = randomIndex(this.queue.length, this.queueIndex);
+    else this.queueIndex = (this.queueIndex + offset + this.queue.length) % this.queue.length;
+    this.loadCurrentTrack(true);
+  }
+
+  private handleEnded(): void {
+    if (this.playbackMode === "single") return;
+    this.playRelative(1);
+  }
+
+  private toggleCurrentFavorite(): void {
+    const node = this.queue[this.queueIndex];
+    if (!node) return;
+    if (this.favorites.has(node.url)) this.favorites.delete(node.url); else this.favorites.add(node.url);
+    if (this.queueIsFavorites && !this.favorites.has(node.url)) {
+      const next = this.queue[(this.queueIndex + 1) % this.queue.length]?.url;
+      this.queue = this.queue.filter((item) => item.url !== node.url);
+      if (!this.queue.length) this.closePlayer();
+      else { this.queueIndex = Math.max(0, this.queue.findIndex((item) => item.url === next)); this.loadCurrentTrack(false); }
+    }
+    this.refreshPlayerFavorite();
+    void this.persist();
+    this.render();
+  }
+
+  private refreshPlayerFavorite(): void {
+    const node = this.queue[this.queueIndex];
+    this.playerFavorite.textContent = node && this.favorites.has(node.url) ? "取消收藏" : "收藏";
+  }
+
+  private closePlayer(): void {
+    this.audio.pause();
+    this.audio.removeAttribute("src");
+    this.audio.load();
+    this.player.classList.add("hidden");
   }
 
   private async restore(): Promise<void> {
@@ -186,6 +281,7 @@ function readSourceOrigin(value: unknown): string { if (typeof value !== "object
 function encodePath(path: string): string { return path.split("/").map((segment) => encodeURIComponent(segment)).join("/"); }
 function emptyState(message: string): HTMLElement { const element = document.createElement("div"); element.className = "empty"; element.textContent = message; return element; }
 function requireElement<T extends Element = HTMLElement>(selector: string): T { const element = document.querySelector<T>(selector); if (!element) throw new Error(`Missing element: ${selector}`); return element; }
+function randomIndex(length: number, current: number): number { if (length < 2) return current; let next = current; while (next === current) next = Math.floor(Math.random() * length); return next; }
 
 function openDatabase(): Promise<IDBDatabase> { return new Promise((resolve, reject) => { const request = indexedDB.open("asmrgay-index-viewer", 1); request.onupgradeneeded = () => { if (!request.result.objectStoreNames.contains("state")) request.result.createObjectStore("state"); }; request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error); }); }
 async function loadState(): Promise<ViewerState | undefined> { const database = await openDatabase(); try { return await new Promise((resolve, reject) => { const request = database.transaction("state").objectStore("state").get(STATE_KEY); request.onsuccess = () => resolve(request.result as ViewerState | undefined); request.onerror = () => reject(request.error); }); } finally { database.close(); } }
