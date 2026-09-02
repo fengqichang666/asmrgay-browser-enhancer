@@ -215,6 +215,7 @@
       rootPath: normalizeRootPath(input.rootPath),
       entries: input.entries.map((entry) => sanitizeEntry(entry, sourceOrigin)),
       favorites: [...input.favorites].map((url) => normalizeSameOriginUrl(url, sourceOrigin)),
+      blacklisted: [...input.blacklisted ?? []].map((url) => normalizeSameOriginUrl(url, sourceOrigin)),
       ...input.graph ? { graph: input.graph } : {},
       ...input.desktopState ? { desktopState: sanitizeDesktopState(input.desktopState, sourceOrigin) } : {}
     };
@@ -235,6 +236,7 @@
     if (!Array.isArray(value.entries)) throw new Error("entries \u5FC5\u987B\u662F\u6570\u7EC4");
     if (value.entries.length > MAX_IMPORT_ENTRIES) throw new Error(`entries \u8D85\u8FC7 ${MAX_IMPORT_ENTRIES} \u9879\u4E0A\u9650`);
     if (!Array.isArray(value.favorites)) throw new Error("favorites \u5FC5\u987B\u662F\u6570\u7EC4");
+    if (value.blacklisted !== void 0 && !Array.isArray(value.blacklisted)) throw new Error("blacklisted \u5FC5\u987B\u662F\u6570\u7EC4");
     const graph = parseGraph(value.graph, sourceOrigin);
     const desktopState = parseDesktopState(value.desktopState, sourceOrigin);
     return {
@@ -246,6 +248,10 @@
       entries: value.entries.map((entry) => parseEntry(entry, sourceOrigin)),
       favorites: value.favorites.map((url) => {
         if (typeof url !== "string") throw new Error("favorites \u542B\u6709\u975E\u5B57\u7B26\u4E32\u5730\u5740");
+        return normalizeSameOriginUrl(url, sourceOrigin);
+      }),
+      blacklisted: (value.blacklisted ?? []).map((url) => {
+        if (typeof url !== "string") throw new Error("blacklisted \u542B\u6709\u975E\u5B57\u7B26\u4E32\u5730\u5740");
         return normalizeSameOriginUrl(url, sourceOrigin);
       }),
       ...graph ? { graph } : {},
@@ -534,7 +540,7 @@
     position: fixed; top: 0; left: 0; bottom: 0; z-index: 2147483647;
     width: min(460px, 100vw); background: #f7f8fa; color: #20242a;
     border-right: 1px solid #cfd5dc; box-shadow: 8px 0 28px rgba(0,0,0,.18);
-    display: grid; grid-template-rows: auto auto auto auto minmax(0, 1fr); font: 14px/1.4 system-ui, sans-serif;
+    display: grid; grid-template-rows: auto auto auto auto minmax(0, 1fr) auto; font: 14px/1.4 system-ui, sans-serif;
   }
   .abe-hidden { display: none !important; }
   .abe-header { display: flex; align-items: center; gap: 10px; padding: 12px 14px; background: #fff; border-bottom: 1px solid #dfe3e8; }
@@ -570,7 +576,12 @@
   .abe-tree-error:hover { background: #fbeae8; }
   .abe-list { overflow: auto; overflow-anchor: none; padding: 6px 0; }
   .abe-empty { padding: 32px 20px; text-align: center; color: #69717c; }
-  .abe-row { display: grid; grid-template-columns: 28px minmax(0,1fr) 68px; align-items: center; min-height: 48px; padding: 4px 10px 4px 14px; border-bottom: 1px solid #e5e8ec; background: #fff; content-visibility: auto; contain-intrinsic-size: 48px; }
+  .abe-player { padding: 10px; border-top: 1px solid #cbd5df; background: #fff; box-shadow: 0 -3px 12px rgba(0,0,0,.08); }
+  .abe-player-top { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+  .abe-player-title { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+  .abe-player .abe-icon-button { flex: 0 0 auto; width: 28px; height: 28px; }
+  .abe-audio { display: block; width: 100%; height: 36px; }
+  .abe-row { display: grid; grid-template-columns: 28px minmax(0,1fr) 98px; align-items: center; min-height: 48px; padding: 4px 10px 4px 14px; border-bottom: 1px solid #e5e8ec; background: #fff; content-visibility: auto; contain-intrinsic-size: 48px; }
   .abe-row:hover { background: #f0f5f9; }
   .abe-kind { width: 28px; height: 36px; border: 0; background: transparent; color: #68727d; padding: 0; font-size: 18px; cursor: default; }
   .abe-kind[data-action="expand"] { cursor: pointer; }
@@ -580,6 +591,8 @@
   .abe-meta { display: block; color: #747d87; font-size: 12px; }
   .abe-favorite { border: 0; background: transparent; color: #8a929b; width: 32px; height: 32px; cursor: pointer; font-size: 20px; }
   .abe-favorite[data-active="true"] { color: #d58a00; }
+  .abe-blacklist { border: 0; background: transparent; color: #8a929b; width: 28px; height: 32px; cursor: pointer; font-size: 18px; }
+  .abe-blacklist[data-active="true"] { color: #b43d3d; }
   .abe-row-actions { display: flex; align-items: center; justify-content: flex-end; gap: 3px; }
   .abe-reclassify { border: 0; background: transparent; color: #7a848d; width: 28px; height: 32px; cursor: pointer; font-size: 16px; }
   @media (max-width: 520px) {
@@ -603,9 +616,13 @@
     pathLabel;
     searchInput;
     typeSelect;
+    player;
+    playerTitle;
+    audio;
     entries = [];
     graph = createGraph();
     favorites = /* @__PURE__ */ new Set();
+    blacklisted = /* @__PURE__ */ new Set();
     loadedDirectories = /* @__PURE__ */ new Set();
     directoryPagination = /* @__PURE__ */ new Map();
     loadingDirectories = /* @__PURE__ */ new Set();
@@ -616,8 +633,10 @@
     filteredEntries = [];
     directoryLoadedAt = /* @__PURE__ */ new Map();
     pendingRefreshChildren = /* @__PURE__ */ new Map();
+    blacklistPending = /* @__PURE__ */ new Set();
     expandedDirectories = /* @__PURE__ */ new Set();
     visibleRows = [];
+    audioRequestId = 0;
     constructor() {
       const host = document.createElement("div");
       host.id = "asmrgay-browser-enhancer";
@@ -631,6 +650,13 @@
       this.pathLabel = this.requireElement(".abe-path");
       this.searchInput = this.requireElement(".abe-search");
       this.typeSelect = this.requireElement(".abe-type");
+      this.player = document.createElement("section");
+      this.player.className = "abe-player abe-hidden";
+      this.player.setAttribute("aria-label", "\u97F3\u9891\u64AD\u653E\u5668");
+      this.player.innerHTML = '<div class="abe-player-top"><strong class="abe-player-title">\u672A\u9009\u62E9\u97F3\u9891</strong><button class="abe-icon-button abe-player-close" type="button" aria-label="\u5173\u95ED\u64AD\u653E\u5668">\xD7</button></div><audio class="abe-audio" controls preload="metadata"></audio>';
+      this.panel.append(this.player);
+      this.playerTitle = this.requireElement(".abe-player-title");
+      this.audio = this.requireElement(".abe-audio");
       this.bindEvents();
       this.updatePath();
       void this.restoreState();
@@ -641,7 +667,7 @@
       <section class="abe-panel abe-hidden" aria-label="ASMRGay \u6309\u9700\u76EE\u5F55\u7D22\u5F15">
         <header class="abe-header"><div class="abe-title"><strong>\u6309\u9700\u76EE\u5F55\u7D22\u5F15</strong><span class="abe-path"></span></div><button class="abe-icon-button abe-close" type="button" aria-label="\u5173\u95ED">\xD7</button></header>
         <div class="abe-toolbar"><button class="abe-primary abe-refresh" type="button" title="\u91CD\u65B0\u8BF7\u6C42\u5F53\u524D\u76EE\u5F55\u7B2C\u4E00\u9875">\u21BB \u5237\u65B0</button><span class="abe-status">\u4EC5\u5728\u5C55\u5F00\u6216\u5237\u65B0\u65F6\u8BF7\u6C42</span><span class="abe-progress"><span class="abe-count"></span> \u9879</span><details class="abe-data-menu"><summary>\u6570\u636E</summary><div class="abe-data-actions"><button type="button" class="abe-secondary abe-export">\u5BFC\u51FA\u7D22\u5F15</button><button type="button" class="abe-secondary abe-export-favorites">\u6536\u85CF JSON</button><button type="button" class="abe-secondary abe-export-csv">\u6536\u85CF CSV</button><select class="abe-import-mode" aria-label="\u5BFC\u5165\u6A21\u5F0F"><option value="merge">\u5408\u5E76\u5BFC\u5165</option><option value="replace">\u66FF\u6362\u5BFC\u5165</option></select><button type="button" class="abe-secondary abe-import">\u5BFC\u5165\u7D22\u5F15</button><button type="button" class="abe-secondary abe-failures">\u5931\u8D25\u65E5\u5FD7</button><button type="button" class="abe-secondary abe-clear">\u6E05\u7A7A\u7D22\u5F15</button><input class="abe-file abe-hidden" type="file" accept="application/json,.json"></div></details></div>
-        <div class="abe-controls"><input class="abe-search" type="search" placeholder="\u641C\u7D22\u5DF2\u52A0\u8F7D\u76EE\u5F55"><select class="abe-type"><option value="all">\u5168\u90E8</option><option value="directory">\u76EE\u5F55</option><option value="content">\u6587\u4EF6</option><option value="favorite">\u6536\u85CF</option><option value="seen">\u5DF2\u770B</option><option value="unseen">\u672A\u770B</option></select></div>
+        <div class="abe-controls"><input class="abe-search" type="search" placeholder="\u641C\u7D22\u5DF2\u52A0\u8F7D\u76EE\u5F55"><select class="abe-type"><option value="all">\u5168\u90E8</option><option value="directory">\u76EE\u5F55</option><option value="content">\u6587\u4EF6</option><option value="favorite">\u6536\u85CF</option><option value="seen">\u5DF2\u770B</option><option value="unseen">\u672A\u770B</option><option value="blacklisted">\u9ED1\u540D\u5355</option></select></div>
         <nav class="abe-breadcrumbs"></nav><div class="abe-list"><div class="abe-empty">\u5C55\u5F00\u76EE\u5F55\u540E\u5EFA\u7ACB\u7D22\u5F15</div></div>
       </section>`;
     }
@@ -662,6 +688,11 @@
       this.requireElement(".abe-file").addEventListener("change", (event) => void this.importIndex(event));
       this.requireElement(".abe-failures").addEventListener("click", () => this.exportFailures());
       this.requireElement(".abe-clear").addEventListener("click", () => void this.clearIndex());
+      this.requireElement(".abe-player-close").addEventListener("click", () => this.closePlayer());
+      this.audio.setAttribute("referrerpolicy", "no-referrer");
+      this.audio.addEventListener("error", () => {
+        this.status.textContent = "\u64AD\u653E\u5931\u8D25\uFF1A\u97F3\u9891\u5730\u5740\u4E0D\u53EF\u7528\u6216\u6682\u65F6\u65E0\u6CD5\u8BBF\u95EE";
+      });
       window.setInterval(() => this.updatePath(), 500);
     }
     async ensureDirectory(path, force) {
@@ -741,6 +772,16 @@
         }
         return;
       }
+      const blacklist = target.closest(".abe-blacklist");
+      const blacklistUrl = blacklist?.dataset.url;
+      if (blacklist && blacklistUrl) {
+        const entry = this.entries.find((item) => item.url === blacklistUrl);
+        if (entry && !this.blacklistPending.has(entry.url)) {
+          blacklist.disabled = true;
+          void this.toggleBlacklist(entry);
+        }
+        return;
+      }
       const button = target.closest(".abe-favorite");
       const url = button?.dataset.url;
       if (!button || !url) return;
@@ -767,9 +808,10 @@
     render() {
       const query = this.searchInput.value.trim().toLocaleLowerCase();
       const type = this.typeSelect.value;
-      const scopedEntries = query || type === "favorite" || type === "seen" || type === "unseen" ? this.entries : childrenOf(this.graph, new URL(encodePath(this.selectedDirectory), location.origin).href).map(nodeToEntry);
+      const scopedEntries = query || type === "favorite" || type === "seen" || type === "unseen" || type === "blacklisted" ? this.entries : childrenOf(this.graph, new URL(encodePath(this.selectedDirectory), location.origin).href).map(nodeToEntry);
       const filtered = scopedEntries.filter((entry) => {
-        const matchesType = type === "favorite" ? this.favorites.has(entry.url) : type === "seen" ? this.seenUrls.has(entry.url) : type === "unseen" ? !this.seenUrls.has(entry.url) : type === "all" || entry.type === type;
+        const inBlacklist = this.blacklisted.has(entry.url);
+        const matchesType = type === "blacklisted" ? inBlacklist : inBlacklist ? false : type === "favorite" ? this.favorites.has(entry.url) : type === "seen" ? this.seenUrls.has(entry.url) : type === "unseen" ? !this.seenUrls.has(entry.url) : type === "all" || entry.type === type;
         return matchesType && (!query || `${entry.title} ${entry.url}`.toLocaleLowerCase().includes(query));
       });
       this.filteredEntries = filtered;
@@ -784,6 +826,7 @@
       const visit = (parentUrl, depth, ancestors) => {
         for (const node of childrenOf(this.graph, parentUrl)) {
           if (ancestors.has(node.url)) continue;
+          if (this.blacklisted.has(node.url)) continue;
           const entry = nodeToEntry(node);
           const path = pathFromUrl(entry.url);
           const expanded = entry.type === "directory" && this.expandedDirectories.has(path);
@@ -814,7 +857,7 @@
       if (!this.visibleRows.length) {
         const empty = document.createElement("div");
         empty.className = "abe-empty";
-        empty.textContent = this.entries.length ? "\u6CA1\u6709\u5339\u914D\u6761\u76EE" : "\u5C55\u5F00\u76EE\u5F55\u540E\u5EFA\u7ACB\u7D22\u5F15";
+        empty.textContent = typeEmptyMessage(this.typeSelect.value, this.entries.length > 0);
         this.list.append(empty);
         this.list.scrollTop = scrollTop;
         return;
@@ -893,8 +936,10 @@
       const link = document.createElement("a");
       link.className = "abe-link";
       link.href = entry.url;
-      link.target = "_blank";
-      link.rel = "noopener noreferrer";
+      if (entry.type === "directory") {
+        link.target = "_blank";
+        link.rel = "noopener noreferrer";
+      }
       const name = document.createElement("span");
       name.className = "abe-name";
       name.textContent = entry.title;
@@ -910,6 +955,13 @@
           this.toggleDirectory(pathFromUrl(entry.url));
           return;
         }
+        if (entry.type === "content") {
+          event.preventDefault();
+          this.seenUrls.add(entry.url);
+          void this.persistState(this.selectedDirectory);
+          void this.playAudio(entry.url, entry.title);
+          return;
+        }
         this.seenUrls.add(entry.url);
         void this.persistState(this.selectedDirectory);
       });
@@ -922,15 +974,70 @@
       favorite.dataset.active = String(this.favorites.has(entry.url));
       favorite.title = this.favorites.has(entry.url) ? "\u53D6\u6D88\u6536\u85CF" : "\u6536\u85CF";
       favorite.textContent = "\u2605";
+      const blacklisted = this.blacklisted.has(entry.url);
+      const blacklist = document.createElement("button");
+      blacklist.type = "button";
+      blacklist.className = "abe-blacklist";
+      blacklist.dataset.url = entry.url;
+      blacklist.dataset.active = String(blacklisted);
+      blacklist.title = blacklisted ? "\u79FB\u51FA\u9ED1\u540D\u5355" : "\u52A0\u5165\u9ED1\u540D\u5355";
+      blacklist.setAttribute("aria-label", blacklist.title);
+      blacklist.textContent = blacklisted ? "\u21A9" : "\u2298";
       const reclassify = document.createElement("button");
       reclassify.type = "button";
       reclassify.className = "abe-reclassify";
       reclassify.dataset.url = entry.url;
       reclassify.title = "\u5207\u6362\u76EE\u5F55/\u6587\u4EF6\u5206\u7C7B";
       reclassify.textContent = "\u2194";
-      actions.append(favorite, reclassify);
+      actions.append(favorite, blacklist, reclassify);
       element.append(kind, link, actions);
       return element;
+    }
+    async toggleBlacklist(entry) {
+      if (this.blacklistPending.has(entry.url)) return;
+      this.blacklistPending.add(entry.url);
+      const active = this.blacklisted.has(entry.url);
+      try {
+        if (active) this.blacklisted.delete(entry.url);
+        else this.blacklisted.add(entry.url);
+        try {
+          await this.persistState(this.selectedDirectory);
+        } catch (error) {
+          this.status.textContent = error instanceof Error ? `\u9ED1\u540D\u5355\u4FDD\u5B58\u5931\u8D25\uFF1A${error.message}` : "\u9ED1\u540D\u5355\u4FDD\u5B58\u5931\u8D25";
+        }
+      } finally {
+        this.blacklistPending.delete(entry.url);
+        this.render();
+      }
+    }
+    async playAudio(url, title) {
+      const requestId = ++this.audioRequestId;
+      this.audio.pause();
+      this.audio.removeAttribute("src");
+      this.audio.load();
+      this.playerTitle.textContent = title;
+      this.player.classList.remove("abe-hidden");
+      this.status.textContent = "\u6B63\u5728\u83B7\u53D6\u64AD\u653E\u5730\u5740\u2026";
+      try {
+        const mediaUrl = await resolveMediaUrl(url, location.origin);
+        if (requestId !== this.audioRequestId) return;
+        this.audio.src = mediaUrl;
+        this.audio.load();
+        this.status.textContent = "\u64AD\u653E\u5730\u5740\u5DF2\u5C31\u7EEA";
+        void this.audio.play().catch(() => {
+          this.status.textContent = "\u64AD\u653E\u5730\u5740\u5DF2\u5C31\u7EEA\uFF0C\u8BF7\u70B9\u51FB\u64AD\u653E\u5668\u64AD\u653E";
+        });
+      } catch (error) {
+        if (requestId !== this.audioRequestId) return;
+        this.status.textContent = error instanceof Error ? `\u64AD\u653E\u5730\u5740\u83B7\u53D6\u5931\u8D25\uFF1A${error.message}` : "\u64AD\u653E\u5730\u5740\u83B7\u53D6\u5931\u8D25";
+      }
+    }
+    closePlayer() {
+      this.audioRequestId += 1;
+      this.audio.pause();
+      this.audio.removeAttribute("src");
+      this.audio.load();
+      this.player.classList.add("abe-hidden");
     }
     async restoreState() {
       try {
@@ -939,6 +1046,7 @@
           this.graph = state.graph ? hydrateGraph(state.graph) : createGraph();
           this.entries = state.graph ? graphEntries(this.graph) : state.entries;
           this.favorites = new Set(state.favorites);
+          this.blacklisted = new Set(state.blacklisted ?? []);
           this.loadedDirectories = new Set(state.loadedDirectories ?? []);
           this.directoryPagination = new Map(Object.entries(state.directoryPagination ?? {}));
           this.directoryLoadedAt = new Map(Object.entries(state.directoryLoadedAt ?? {}));
@@ -963,10 +1071,10 @@
       }
     }
     async persistState(rootPath) {
-      await saveIndexState({ id: location.origin, rootPath, updatedAt: (/* @__PURE__ */ new Date()).toISOString(), entries: this.entries, favorites: [...this.favorites], failures: this.failures, loadedDirectories: [...this.loadedDirectories], directoryPagination: Object.fromEntries(this.directoryPagination), directoryLoadedAt: Object.fromEntries(this.directoryLoadedAt), seenUrls: [...this.seenUrls], directoryErrors: Object.fromEntries(this.directoryErrors), expandedDirectories: [...this.expandedDirectories], graph: serializeGraph(this.graph) });
+      await saveIndexState({ id: location.origin, rootPath, updatedAt: (/* @__PURE__ */ new Date()).toISOString(), entries: this.entries, favorites: [...this.favorites], blacklisted: [...this.blacklisted], failures: this.failures, loadedDirectories: [...this.loadedDirectories], directoryPagination: Object.fromEntries(this.directoryPagination), directoryLoadedAt: Object.fromEntries(this.directoryLoadedAt), seenUrls: [...this.seenUrls], directoryErrors: Object.fromEntries(this.directoryErrors), expandedDirectories: [...this.expandedDirectories], graph: serializeGraph(this.graph) });
     }
     exportIndex() {
-      downloadJson(createIndexExport({ sourceOrigin: location.origin, rootPath: currentPath(), entries: this.entries, favorites: this.favorites, graph: serializeGraph(this.graph), desktopState: { seenUrls: [...this.seenUrls], loadedDirectories: [...this.loadedDirectories], directoryPagination: Object.fromEntries(this.directoryPagination), directoryLoadedAt: Object.fromEntries(this.directoryLoadedAt), expandedDirectories: [...this.expandedDirectories] } }), `asmrgay-index-${(/* @__PURE__ */ new Date()).toISOString().slice(0, 10)}.json`);
+      downloadJson(createIndexExport({ sourceOrigin: location.origin, rootPath: currentPath(), entries: this.entries, favorites: this.favorites, blacklisted: this.blacklisted, graph: serializeGraph(this.graph), desktopState: { seenUrls: [...this.seenUrls], loadedDirectories: [...this.loadedDirectories], directoryPagination: Object.fromEntries(this.directoryPagination), directoryLoadedAt: Object.fromEntries(this.directoryLoadedAt), expandedDirectories: [...this.expandedDirectories] } }), `asmrgay-index-${(/* @__PURE__ */ new Date()).toISOString().slice(0, 10)}.json`);
       this.status.textContent = `\u5DF2\u5BFC\u51FA ${this.entries.length} \u9879\u5DF2\u52A0\u8F7D\u7D22\u5F15`;
     }
     exportFavoritesJson() {
@@ -996,6 +1104,7 @@
           this.entries = imported.entries;
           this.graph = imported.graph ? hydrateGraph(imported.graph) : createGraph();
           this.favorites = new Set(imported.favorites);
+          this.blacklisted = new Set(imported.blacklisted);
           this.loadedDirectories.clear();
           this.directoryPagination.clear();
           this.directoryLoadedAt.clear();
@@ -1005,6 +1114,7 @@
           this.entries = mergeEntryLists(this.entries, imported.entries);
           if (imported.graph) this.graph = mergeGraphs(this.graph, hydrateGraph(imported.graph));
           this.favorites = /* @__PURE__ */ new Set([...this.favorites, ...imported.favorites]);
+          this.blacklisted = /* @__PURE__ */ new Set([...this.blacklisted, ...imported.blacklisted]);
         }
         if (imported.desktopState) {
           this.seenUrls = new Set(imported.desktopState.seenUrls);
@@ -1028,10 +1138,11 @@
       downloadJson({ schemaVersion: 1, exportedAt: (/* @__PURE__ */ new Date()).toISOString(), sourceOrigin: location.origin, scannerMode: "alist-api", failures: this.failures }, `asmrgay-failures-${(/* @__PURE__ */ new Date()).toISOString().slice(0, 10)}.json`);
     }
     async clearIndex() {
-      if (!window.confirm("\u786E\u5B9A\u6E05\u7A7A\u5DF2\u52A0\u8F7D\u7D22\u5F15\u548C\u6536\u85CF\u5417\uFF1F\u5EFA\u8BAE\u5148\u5BFC\u51FA\u5907\u4EFD\u3002")) return;
+      if (!window.confirm("\u786E\u5B9A\u6E05\u7A7A\u5DF2\u52A0\u8F7D\u7D22\u5F15\u3001\u6536\u85CF\u548C\u9ED1\u540D\u5355\u5417\uFF1F\u5EFA\u8BAE\u5148\u5BFC\u51FA\u5907\u4EFD\u3002")) return;
       this.entries = [];
       this.graph = createGraph();
       this.favorites.clear();
+      this.blacklisted.clear();
       this.loadedDirectories.clear();
       this.directoryPagination.clear();
       this.directoryLoadedAt.clear();
@@ -1040,7 +1151,7 @@
       this.expandedDirectories.clear();
       this.failures = [];
       await deleteIndexState(location.origin);
-      this.status.textContent = "\u7D22\u5F15\u548C\u6536\u85CF\u5DF2\u6E05\u7A7A";
+      this.status.textContent = "\u7D22\u5F15\u3001\u6536\u85CF\u548C\u9ED1\u540D\u5355\u5DF2\u6E05\u7A7A";
       this.render();
     }
     setRefreshDisabled(disabled) {
@@ -1094,6 +1205,18 @@
     } catch {
       return /* @__PURE__ */ new Set();
     }
+  }
+  function typeEmptyMessage(type, hasEntries) {
+    if (type === "blacklisted") return "\u9ED1\u540D\u5355\u4E3A\u7A7A";
+    return hasEntries ? "\u6CA1\u6709\u5339\u914D\u6761\u76EE" : "\u5C55\u5F00\u76EE\u5F55\u540E\u5EFA\u7ACB\u7D22\u5F15";
+  }
+  async function resolveMediaUrl(fileUrl, sourceOrigin) {
+    const path = decodeURIComponent(new URL(fileUrl).pathname);
+    const response = await fetch(`${sourceOrigin}/api/fs/get`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ path, password: "" }) });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const payload = await response.json();
+    if (payload.code !== 200 || !payload.data?.raw_url) throw new Error(payload.message || "\u63A5\u53E3\u672A\u8FD4\u56DE\u97F3\u9891\u5730\u5740");
+    return payload.data.raw_url;
   }
   function formatSize(bytes) {
     if (!Number.isFinite(bytes) || bytes <= 0) return "";

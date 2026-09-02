@@ -12,6 +12,7 @@ export interface IndexExport {
   rootPath: string;
   entries: DiscoveredEntry[];
   favorites: string[];
+  blacklisted: string[];
   graph?: SerializedGraph;
   desktopState?: DesktopExportState;
 }
@@ -29,6 +30,7 @@ export interface CreateExportInput {
   rootPath: string;
   entries: readonly DiscoveredEntry[];
   favorites: ReadonlySet<string>;
+  blacklisted?: ReadonlySet<string>;
   exportedAt?: string;
   graph?: SerializedGraph;
   desktopState?: DesktopExportState;
@@ -44,6 +46,7 @@ export function createIndexExport(input: CreateExportInput): IndexExport {
     rootPath: normalizeRootPath(input.rootPath),
     entries: input.entries.map((entry) => sanitizeEntry(entry, sourceOrigin)),
     favorites: [...input.favorites].map((url) => normalizeSameOriginUrl(url, sourceOrigin)),
+    blacklisted: [...(input.blacklisted ?? [])].map((url) => normalizeSameOriginUrl(url, sourceOrigin)),
     ...(input.graph ? { graph: input.graph } : {}),
     ...(input.desktopState ? { desktopState: sanitizeDesktopState(input.desktopState, sourceOrigin) } : {}),
   };
@@ -65,6 +68,7 @@ export function parseIndexExport(value: unknown, expectedOrigin: string): IndexE
   if (!Array.isArray(value.entries)) throw new Error("entries 必须是数组");
   if (value.entries.length > MAX_IMPORT_ENTRIES) throw new Error(`entries 超过 ${MAX_IMPORT_ENTRIES} 项上限`);
   if (!Array.isArray(value.favorites)) throw new Error("favorites 必须是数组");
+  if (value.blacklisted !== undefined && !Array.isArray(value.blacklisted)) throw new Error("blacklisted 必须是数组");
 
   const graph = parseGraph(value.graph, sourceOrigin);
   const desktopState = parseDesktopState(value.desktopState, sourceOrigin);
@@ -77,6 +81,10 @@ export function parseIndexExport(value: unknown, expectedOrigin: string): IndexE
     entries: value.entries.map((entry) => parseEntry(entry, sourceOrigin)),
     favorites: value.favorites.map((url) => {
       if (typeof url !== "string") throw new Error("favorites 含有非字符串地址");
+      return normalizeSameOriginUrl(url, sourceOrigin);
+    }),
+    blacklisted: (value.blacklisted ?? []).map((url) => {
+      if (typeof url !== "string") throw new Error("blacklisted 含有非字符串地址");
       return normalizeSameOriginUrl(url, sourceOrigin);
     }),
     ...(graph ? { graph } : {}),

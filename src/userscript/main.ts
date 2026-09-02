@@ -23,9 +23,13 @@ class OnDemandPanel {
   private readonly pathLabel: HTMLElement;
   private readonly searchInput: HTMLInputElement;
   private readonly typeSelect: HTMLSelectElement;
+  private readonly player: HTMLElement;
+  private readonly playerTitle: HTMLElement;
+  private readonly audio: HTMLAudioElement;
   private entries: DiscoveredEntry[] = [];
   private graph: IndexGraph = createGraph();
   private favorites = new Set<string>();
+  private blacklisted = new Set<string>();
   private loadedDirectories = new Set<string>();
   private directoryPagination = new Map<string, { nextPage: number; loaded: number; total: number; complete: boolean }>();
   private loadingDirectories = new Set<string>();
@@ -36,8 +40,10 @@ class OnDemandPanel {
   private filteredEntries: DiscoveredEntry[] = [];
   private directoryLoadedAt = new Map<string, string>();
   private pendingRefreshChildren = new Map<string, Set<string>>();
+  private blacklistPending = new Set<string>();
   private expandedDirectories = new Set<string>();
   private visibleRows: VisibleTreeRow[] = [];
+  private audioRequestId = 0;
 
   constructor() {
     const host = document.createElement("div");
@@ -52,6 +58,13 @@ class OnDemandPanel {
     this.pathLabel = this.requireElement(".abe-path");
     this.searchInput = this.requireElement<HTMLInputElement>(".abe-search");
     this.typeSelect = this.requireElement<HTMLSelectElement>(".abe-type");
+    this.player = document.createElement("section");
+    this.player.className = "abe-player abe-hidden";
+    this.player.setAttribute("aria-label", "音频播放器");
+    this.player.innerHTML = '<div class="abe-player-top"><strong class="abe-player-title">未选择音频</strong><button class="abe-icon-button abe-player-close" type="button" aria-label="关闭播放器">×</button></div><audio class="abe-audio" controls preload="metadata"></audio>';
+    this.panel.append(this.player);
+    this.playerTitle = this.requireElement(".abe-player-title");
+    this.audio = this.requireElement<HTMLAudioElement>(".abe-audio");
     this.bindEvents();
     this.updatePath();
     void this.restoreState();
@@ -63,7 +76,7 @@ class OnDemandPanel {
       <section class="abe-panel abe-hidden" aria-label="ASMRGay 按需目录索引">
         <header class="abe-header"><div class="abe-title"><strong>按需目录索引</strong><span class="abe-path"></span></div><button class="abe-icon-button abe-close" type="button" aria-label="关闭">×</button></header>
         <div class="abe-toolbar"><button class="abe-primary abe-refresh" type="button" title="重新请求当前目录第一页">↻ 刷新</button><span class="abe-status">仅在展开或刷新时请求</span><span class="abe-progress"><span class="abe-count"></span> 项</span><details class="abe-data-menu"><summary>数据</summary><div class="abe-data-actions"><button type="button" class="abe-secondary abe-export">导出索引</button><button type="button" class="abe-secondary abe-export-favorites">收藏 JSON</button><button type="button" class="abe-secondary abe-export-csv">收藏 CSV</button><select class="abe-import-mode" aria-label="导入模式"><option value="merge">合并导入</option><option value="replace">替换导入</option></select><button type="button" class="abe-secondary abe-import">导入索引</button><button type="button" class="abe-secondary abe-failures">失败日志</button><button type="button" class="abe-secondary abe-clear">清空索引</button><input class="abe-file abe-hidden" type="file" accept="application/json,.json"></div></details></div>
-        <div class="abe-controls"><input class="abe-search" type="search" placeholder="搜索已加载目录"><select class="abe-type"><option value="all">全部</option><option value="directory">目录</option><option value="content">文件</option><option value="favorite">收藏</option><option value="seen">已看</option><option value="unseen">未看</option></select></div>
+        <div class="abe-controls"><input class="abe-search" type="search" placeholder="搜索已加载目录"><select class="abe-type"><option value="all">全部</option><option value="directory">目录</option><option value="content">文件</option><option value="favorite">收藏</option><option value="seen">已看</option><option value="unseen">未看</option><option value="blacklisted">黑名单</option></select></div>
         <nav class="abe-breadcrumbs"></nav><div class="abe-list"><div class="abe-empty">展开目录后建立索引</div></div>
       </section>`;
   }
@@ -82,6 +95,9 @@ class OnDemandPanel {
     this.requireElement<HTMLInputElement>(".abe-file").addEventListener("change", (event) => void this.importIndex(event));
     this.requireElement(".abe-failures").addEventListener("click", () => this.exportFailures());
     this.requireElement(".abe-clear").addEventListener("click", () => void this.clearIndex());
+    this.requireElement(".abe-player-close").addEventListener("click", () => this.closePlayer());
+    this.audio.setAttribute("referrerpolicy", "no-referrer");
+    this.audio.addEventListener("error", () => { this.status.textContent = "播放失败：音频地址不可用或暂时无法访问"; });
     window.setInterval(() => this.updatePath(), 500);
   }
 
@@ -149,6 +165,16 @@ class OnDemandPanel {
       }
       return;
     }
+    const blacklist = target.closest<HTMLButtonElement>(".abe-blacklist");
+    const blacklistUrl = blacklist?.dataset.url;
+    if (blacklist && blacklistUrl) {
+      const entry = this.entries.find((item) => item.url === blacklistUrl);
+      if (entry && !this.blacklistPending.has(entry.url)) {
+        blacklist.disabled = true;
+        void this.toggleBlacklist(entry);
+      }
+      return;
+    }
     const button = target.closest<HTMLButtonElement>(".abe-favorite");
     const url = button?.dataset.url;
     if (!button || !url) return;
@@ -175,11 +201,12 @@ class OnDemandPanel {
   private render(): void {
     const query = this.searchInput.value.trim().toLocaleLowerCase();
     const type = this.typeSelect.value;
-    const scopedEntries = query || type === "favorite" || type === "seen" || type === "unseen"
+    const scopedEntries = query || type === "favorite" || type === "seen" || type === "unseen" || type === "blacklisted"
       ? this.entries
       : childrenOf(this.graph, new URL(encodePath(this.selectedDirectory), location.origin).href).map(nodeToEntry);
     const filtered = scopedEntries.filter((entry) => {
-      const matchesType = type === "favorite" ? this.favorites.has(entry.url) : type === "seen" ? this.seenUrls.has(entry.url) : type === "unseen" ? !this.seenUrls.has(entry.url) : type === "all" || entry.type === type;
+      const inBlacklist = this.blacklisted.has(entry.url);
+      const matchesType = type === "blacklisted" ? inBlacklist : inBlacklist ? false : type === "favorite" ? this.favorites.has(entry.url) : type === "seen" ? this.seenUrls.has(entry.url) : type === "unseen" ? !this.seenUrls.has(entry.url) : type === "all" || entry.type === type;
       return matchesType && (!query || `${entry.title} ${entry.url}`.toLocaleLowerCase().includes(query));
     });
     this.filteredEntries = filtered;
@@ -195,6 +222,7 @@ class OnDemandPanel {
     const visit = (parentUrl: string, depth: number, ancestors: ReadonlySet<string>): void => {
       for (const node of childrenOf(this.graph, parentUrl)) {
         if (ancestors.has(node.url)) continue;
+        if (this.blacklisted.has(node.url)) continue;
         const entry = nodeToEntry(node);
         const path = pathFromUrl(entry.url);
         const expanded = entry.type === "directory" && this.expandedDirectories.has(path);
@@ -217,7 +245,7 @@ class OnDemandPanel {
   private renderWindow(): void {
     const scrollTop = this.list.scrollTop;
     this.list.replaceChildren();
-    if (!this.visibleRows.length) { const empty = document.createElement("div"); empty.className = "abe-empty"; empty.textContent = this.entries.length ? "没有匹配条目" : "展开目录后建立索引"; this.list.append(empty); this.list.scrollTop = scrollTop; return; }
+    if (!this.visibleRows.length) { const empty = document.createElement("div"); empty.className = "abe-empty"; empty.textContent = typeEmptyMessage(this.typeSelect.value, this.entries.length > 0); this.list.append(empty); this.list.scrollTop = scrollTop; return; }
     const fragment = document.createDocumentFragment();
     for (const row of this.visibleRows) fragment.append(this.createTreeRow(row));
     this.list.append(fragment);
@@ -244,24 +272,74 @@ class OnDemandPanel {
     const element = document.createElement("div"); element.className = "abe-row";
     element.style.paddingLeft = `${14 + row.depth * 22}px`;
     const kind = document.createElement("button"); kind.type = "button"; kind.className = "abe-kind"; kind.dataset.action = entry.type === "directory" ? "expand" : "noop"; kind.dataset.path = entry.type === "directory" ? pathFromUrl(entry.url) : ""; kind.textContent = entry.type === "directory" ? (row.expanded ? "▾" : "▸") : "♪"; kind.title = entry.type === "directory" ? (row.expanded ? "收起目录" : "展开目录") : "文件";
-    const link = document.createElement("a"); link.className = "abe-link"; link.href = entry.url; link.target = "_blank"; link.rel = "noopener noreferrer";
+    const link = document.createElement("a"); link.className = "abe-link"; link.href = entry.url;
+    if (entry.type === "directory") { link.target = "_blank"; link.rel = "noopener noreferrer"; }
     const name = document.createElement("span"); name.className = "abe-name"; name.textContent = entry.title;
-    const meta = document.createElement("span"); meta.className = "abe-meta"; meta.textContent = entry.type === "directory" ? (this.loadedDirectories.has(pathFromUrl(entry.url)) ? `目录 · 已加载${this.directoryLoadedAt.get(pathFromUrl(entry.url)) ? ` · ${formatTime(this.directoryLoadedAt.get(pathFromUrl(entry.url))!)}` : ""}` : "目录 · 点击展开") : formatSize(Number(entry.metadata?.size)) || "文件"; if (entry.metadata?.status === "missing") meta.textContent += " · 已失效"; if (this.seenUrls.has(entry.url)) meta.textContent += " · 已看"; link.append(name, meta); link.addEventListener("click", (event) => { if (entry.type === "directory" && event.button === 0 && !event.ctrlKey && !event.metaKey && !event.shiftKey && !event.altKey) { event.preventDefault(); this.toggleDirectory(pathFromUrl(entry.url)); return; } this.seenUrls.add(entry.url); void this.persistState(this.selectedDirectory); });
+    const meta = document.createElement("span"); meta.className = "abe-meta"; meta.textContent = entry.type === "directory" ? (this.loadedDirectories.has(pathFromUrl(entry.url)) ? `目录 · 已加载${this.directoryLoadedAt.get(pathFromUrl(entry.url)) ? ` · ${formatTime(this.directoryLoadedAt.get(pathFromUrl(entry.url))!)}` : ""}` : "目录 · 点击展开") : formatSize(Number(entry.metadata?.size)) || "文件"; if (entry.metadata?.status === "missing") meta.textContent += " · 已失效"; if (this.seenUrls.has(entry.url)) meta.textContent += " · 已看"; link.append(name, meta); link.addEventListener("click", (event) => { if (entry.type === "directory" && event.button === 0 && !event.ctrlKey && !event.metaKey && !event.shiftKey && !event.altKey) { event.preventDefault(); this.toggleDirectory(pathFromUrl(entry.url)); return; } if (entry.type === "content") { event.preventDefault(); this.seenUrls.add(entry.url); void this.persistState(this.selectedDirectory); void this.playAudio(entry.url, entry.title); return; } this.seenUrls.add(entry.url); void this.persistState(this.selectedDirectory); });
     const actions = document.createElement("span"); actions.className = "abe-row-actions";
     const favorite = document.createElement("button"); favorite.type = "button"; favorite.className = "abe-favorite"; favorite.dataset.url = entry.url; favorite.dataset.active = String(this.favorites.has(entry.url)); favorite.title = this.favorites.has(entry.url) ? "取消收藏" : "收藏"; favorite.textContent = "★";
+    const blacklisted = this.blacklisted.has(entry.url);
+    const blacklist = document.createElement("button"); blacklist.type = "button"; blacklist.className = "abe-blacklist"; blacklist.dataset.url = entry.url; blacklist.dataset.active = String(blacklisted); blacklist.title = blacklisted ? "移出黑名单" : "加入黑名单"; blacklist.setAttribute("aria-label", blacklist.title); blacklist.textContent = blacklisted ? "↩" : "⊘";
     const reclassify = document.createElement("button"); reclassify.type = "button"; reclassify.className = "abe-reclassify"; reclassify.dataset.url = entry.url; reclassify.title = "切换目录/文件分类"; reclassify.textContent = "↔";
-    actions.append(favorite, reclassify); element.append(kind, link, actions); return element;
+    actions.append(favorite, blacklist, reclassify); element.append(kind, link, actions); return element;
   }
 
-  private async restoreState(): Promise<void> { try { const state = await loadIndexState(location.origin); if (state) { this.graph = state.graph ? hydrateGraph(state.graph) : createGraph(); this.entries = state.graph ? graphEntries(this.graph) : state.entries; this.favorites = new Set(state.favorites); this.loadedDirectories = new Set(state.loadedDirectories ?? []); this.directoryPagination = new Map(Object.entries(state.directoryPagination ?? {})); this.directoryLoadedAt = new Map(Object.entries(state.directoryLoadedAt ?? {})); this.failures = state.failures ?? []; this.seenUrls = new Set(state.seenUrls ?? []); this.directoryErrors = new Map(Object.entries(state.directoryErrors ?? {})); this.expandedDirectories = new Set(state.expandedDirectories ?? []); this.status.textContent = `已恢复 ${this.entries.length} 项，按需展开目录`; } else this.favorites = readLegacyFavorites(); this.render(); await this.requestPersistentStorage(); } catch (error) { this.status.textContent = error instanceof Error ? `恢复失败：${error.message}` : "恢复失败"; } }
+  private async toggleBlacklist(entry: DiscoveredEntry): Promise<void> {
+    if (this.blacklistPending.has(entry.url)) return;
+    this.blacklistPending.add(entry.url);
+    const active = this.blacklisted.has(entry.url);
+    try {
+      if (active) this.blacklisted.delete(entry.url);
+      else this.blacklisted.add(entry.url);
+      try {
+        await this.persistState(this.selectedDirectory);
+      } catch (error) {
+        this.status.textContent = error instanceof Error ? `黑名单保存失败：${error.message}` : "黑名单保存失败";
+      }
+    } finally {
+      this.blacklistPending.delete(entry.url);
+      this.render();
+    }
+  }
+
+  private async playAudio(url: string, title: string): Promise<void> {
+    const requestId = ++this.audioRequestId;
+    this.audio.pause();
+    this.audio.removeAttribute("src");
+    this.audio.load();
+    this.playerTitle.textContent = title;
+    this.player.classList.remove("abe-hidden");
+    this.status.textContent = "正在获取播放地址…";
+    try {
+      const mediaUrl = await resolveMediaUrl(url, location.origin);
+      if (requestId !== this.audioRequestId) return;
+      this.audio.src = mediaUrl;
+      this.audio.load();
+      this.status.textContent = "播放地址已就绪";
+      void this.audio.play().catch(() => { this.status.textContent = "播放地址已就绪，请点击播放器播放"; });
+    } catch (error) {
+      if (requestId !== this.audioRequestId) return;
+      this.status.textContent = error instanceof Error ? `播放地址获取失败：${error.message}` : "播放地址获取失败";
+    }
+  }
+
+  private closePlayer(): void {
+    this.audioRequestId += 1;
+    this.audio.pause();
+    this.audio.removeAttribute("src");
+    this.audio.load();
+    this.player.classList.add("abe-hidden");
+  }
+
+  private async restoreState(): Promise<void> { try { const state = await loadIndexState(location.origin); if (state) { this.graph = state.graph ? hydrateGraph(state.graph) : createGraph(); this.entries = state.graph ? graphEntries(this.graph) : state.entries; this.favorites = new Set(state.favorites); this.blacklisted = new Set(state.blacklisted ?? []); this.loadedDirectories = new Set(state.loadedDirectories ?? []); this.directoryPagination = new Map(Object.entries(state.directoryPagination ?? {})); this.directoryLoadedAt = new Map(Object.entries(state.directoryLoadedAt ?? {})); this.failures = state.failures ?? []; this.seenUrls = new Set(state.seenUrls ?? []); this.directoryErrors = new Map(Object.entries(state.directoryErrors ?? {})); this.expandedDirectories = new Set(state.expandedDirectories ?? []); this.status.textContent = `已恢复 ${this.entries.length} 项，按需展开目录`; } else this.favorites = readLegacyFavorites(); this.render(); await this.requestPersistentStorage(); } catch (error) { this.status.textContent = error instanceof Error ? `恢复失败：${error.message}` : "恢复失败"; } }
   private async requestPersistentStorage(): Promise<void> { if (!navigator.storage?.persist) return; try { const persisted = await navigator.storage.persist(); if (persisted) this.status.textContent = "索引已恢复；浏览器已启用持久化存储"; } catch { /* Persistence is optional and browser-controlled. */ } }
-  private async persistState(rootPath: string): Promise<void> { await saveIndexState({ id: location.origin, rootPath, updatedAt: new Date().toISOString(), entries: this.entries, favorites: [...this.favorites], failures: this.failures, loadedDirectories: [...this.loadedDirectories], directoryPagination: Object.fromEntries(this.directoryPagination), directoryLoadedAt: Object.fromEntries(this.directoryLoadedAt), seenUrls: [...this.seenUrls], directoryErrors: Object.fromEntries(this.directoryErrors), expandedDirectories: [...this.expandedDirectories], graph: serializeGraph(this.graph) }); }
-  private exportIndex(): void { downloadJson(createIndexExport({ sourceOrigin: location.origin, rootPath: currentPath(), entries: this.entries, favorites: this.favorites, graph: serializeGraph(this.graph), desktopState: { seenUrls: [...this.seenUrls], loadedDirectories: [...this.loadedDirectories], directoryPagination: Object.fromEntries(this.directoryPagination), directoryLoadedAt: Object.fromEntries(this.directoryLoadedAt), expandedDirectories: [...this.expandedDirectories] } }), `asmrgay-index-${new Date().toISOString().slice(0, 10)}.json`); this.status.textContent = `已导出 ${this.entries.length} 项已加载索引`; }
+  private async persistState(rootPath: string): Promise<void> { await saveIndexState({ id: location.origin, rootPath, updatedAt: new Date().toISOString(), entries: this.entries, favorites: [...this.favorites], blacklisted: [...this.blacklisted], failures: this.failures, loadedDirectories: [...this.loadedDirectories], directoryPagination: Object.fromEntries(this.directoryPagination), directoryLoadedAt: Object.fromEntries(this.directoryLoadedAt), seenUrls: [...this.seenUrls], directoryErrors: Object.fromEntries(this.directoryErrors), expandedDirectories: [...this.expandedDirectories], graph: serializeGraph(this.graph) }); }
+  private exportIndex(): void { downloadJson(createIndexExport({ sourceOrigin: location.origin, rootPath: currentPath(), entries: this.entries, favorites: this.favorites, blacklisted: this.blacklisted, graph: serializeGraph(this.graph), desktopState: { seenUrls: [...this.seenUrls], loadedDirectories: [...this.loadedDirectories], directoryPagination: Object.fromEntries(this.directoryPagination), directoryLoadedAt: Object.fromEntries(this.directoryLoadedAt), expandedDirectories: [...this.expandedDirectories] } }), `asmrgay-index-${new Date().toISOString().slice(0, 10)}.json`); this.status.textContent = `已导出 ${this.entries.length} 项已加载索引`; }
   private exportFavoritesJson(): void { downloadJson({ schemaVersion: 1, exportedAt: new Date().toISOString(), sourceOrigin: location.origin, favorites: [...this.favorites] }, `asmrgay-favorites-${new Date().toISOString().slice(0, 10)}.json`); this.status.textContent = `已导出 ${this.favorites.size} 个收藏`; }
   private exportFavoritesCsv(): void { const rows = [["url", "title", "type"], ...this.entries.filter((entry) => this.favorites.has(entry.url)).map((entry) => [entry.url, entry.title, entry.type])]; const csv = rows.map((row) => row.map(csvCell).join(",")).join("\r\n"); downloadBlob(new Blob([`\uFEFF${csv}`], { type: "text/csv;charset=utf-8" }), `asmrgay-favorites-${new Date().toISOString().slice(0, 10)}.csv`); this.status.textContent = `已导出 ${this.favorites.size} 个收藏`; }
-  private async importIndex(event: Event): Promise<void> { const input = event.target; if (!(input instanceof HTMLInputElement)) return; const file = input.files?.[0]; input.value = ""; if (!file) return; if (file.size > MAX_IMPORT_BYTES) { this.status.textContent = "导入失败：文件超过 20 MB"; return; } try { const imported = parseIndexExport(JSON.parse(await file.text()) as unknown, location.origin); const mode = this.requireElement<HTMLSelectElement>(".abe-import-mode").value; if (mode === "replace") { this.entries = imported.entries; this.graph = imported.graph ? hydrateGraph(imported.graph) : createGraph(); this.favorites = new Set(imported.favorites); this.loadedDirectories.clear(); this.directoryPagination.clear(); this.directoryLoadedAt.clear(); this.seenUrls.clear(); this.expandedDirectories.clear(); } else { this.entries = mergeEntryLists(this.entries, imported.entries); if (imported.graph) this.graph = mergeGraphs(this.graph, hydrateGraph(imported.graph)); this.favorites = new Set([...this.favorites, ...imported.favorites]); } if (imported.desktopState) { this.seenUrls = new Set(imported.desktopState.seenUrls); this.loadedDirectories = new Set(imported.desktopState.loadedDirectories); this.directoryPagination = new Map(Object.entries(imported.desktopState.directoryPagination)); this.directoryLoadedAt = new Map(Object.entries(imported.desktopState.directoryLoadedAt)); this.expandedDirectories = new Set(imported.desktopState.expandedDirectories ?? []); } await this.persistState(imported.rootPath); this.status.textContent = `${mode === "replace" ? "替换" : "合并"}导入完成：当前共 ${this.entries.length} 项`; this.render(); } catch (error) { this.status.textContent = error instanceof Error ? `导入失败：${error.message}` : "导入失败"; } }
+  private async importIndex(event: Event): Promise<void> { const input = event.target; if (!(input instanceof HTMLInputElement)) return; const file = input.files?.[0]; input.value = ""; if (!file) return; if (file.size > MAX_IMPORT_BYTES) { this.status.textContent = "导入失败：文件超过 20 MB"; return; } try { const imported = parseIndexExport(JSON.parse(await file.text()) as unknown, location.origin); const mode = this.requireElement<HTMLSelectElement>(".abe-import-mode").value; if (mode === "replace") { this.entries = imported.entries; this.graph = imported.graph ? hydrateGraph(imported.graph) : createGraph(); this.favorites = new Set(imported.favorites); this.blacklisted = new Set(imported.blacklisted); this.loadedDirectories.clear(); this.directoryPagination.clear(); this.directoryLoadedAt.clear(); this.seenUrls.clear(); this.expandedDirectories.clear(); } else { this.entries = mergeEntryLists(this.entries, imported.entries); if (imported.graph) this.graph = mergeGraphs(this.graph, hydrateGraph(imported.graph)); this.favorites = new Set([...this.favorites, ...imported.favorites]); this.blacklisted = new Set([...this.blacklisted, ...imported.blacklisted]); } if (imported.desktopState) { this.seenUrls = new Set(imported.desktopState.seenUrls); this.loadedDirectories = new Set(imported.desktopState.loadedDirectories); this.directoryPagination = new Map(Object.entries(imported.desktopState.directoryPagination)); this.directoryLoadedAt = new Map(Object.entries(imported.desktopState.directoryLoadedAt)); this.expandedDirectories = new Set(imported.desktopState.expandedDirectories ?? []); } await this.persistState(imported.rootPath); this.status.textContent = `${mode === "replace" ? "替换" : "合并"}导入完成：当前共 ${this.entries.length} 项`; this.render(); } catch (error) { this.status.textContent = error instanceof Error ? `导入失败：${error.message}` : "导入失败"; } }
   private exportFailures(): void { if (!this.failures.length) { this.status.textContent = "目前没有失败记录"; return; } downloadJson({ schemaVersion: 1, exportedAt: new Date().toISOString(), sourceOrigin: location.origin, scannerMode: "alist-api", failures: this.failures }, `asmrgay-failures-${new Date().toISOString().slice(0, 10)}.json`); }
-  private async clearIndex(): Promise<void> { if (!window.confirm("确定清空已加载索引和收藏吗？建议先导出备份。")) return; this.entries = []; this.graph = createGraph(); this.favorites.clear(); this.loadedDirectories.clear(); this.directoryPagination.clear(); this.directoryLoadedAt.clear(); this.seenUrls.clear(); this.directoryErrors.clear(); this.expandedDirectories.clear(); this.failures = []; await deleteIndexState(location.origin); this.status.textContent = "索引和收藏已清空"; this.render(); }
+  private async clearIndex(): Promise<void> { if (!window.confirm("确定清空已加载索引、收藏和黑名单吗？建议先导出备份。")) return; this.entries = []; this.graph = createGraph(); this.favorites.clear(); this.blacklisted.clear(); this.loadedDirectories.clear(); this.directoryPagination.clear(); this.directoryLoadedAt.clear(); this.seenUrls.clear(); this.directoryErrors.clear(); this.expandedDirectories.clear(); this.failures = []; await deleteIndexState(location.origin); this.status.textContent = "索引、收藏和黑名单已清空"; this.render(); }
   private setRefreshDisabled(disabled: boolean): void { this.requireElement<HTMLButtonElement>(".abe-refresh").disabled = disabled; }
   private updatePath(): void { this.pathLabel.textContent = this.selectedDirectory; }
   private requireElement<T extends Element = HTMLElement>(selector: string): T { const element = this.root.querySelector<T>(selector); if (!element) throw new Error(`Missing panel element: ${selector}`); return element; }
@@ -275,6 +353,8 @@ function safeDecode(value: string): string { try { return decodeURIComponent(val
 function mergeGraphs(left: IndexGraph, right: IndexGraph): IndexGraph { for (const [id, node] of right.nodes) left.nodes.set(id, node); for (const [id, edge] of right.edges) left.edges.set(id, edge); return left; }
 function nodeToEntry(node: import("../core/graph.js").IndexNode): DiscoveredEntry { return { url: node.url, title: node.title, type: node.type, metadata: { ...node.metadata, status: node.status, discoveredAt: node.discoveredAt, lastSeenAt: node.lastSeenAt } }; }
 function readLegacyFavorites(): Set<string> { try { const value = JSON.parse(localStorage.getItem(FAVORITES_KEY) ?? "[]") as unknown; return new Set(Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : []); } catch { return new Set(); } }
+function typeEmptyMessage(type: string, hasEntries: boolean): string { if (type === "blacklisted") return "黑名单为空"; return hasEntries ? "没有匹配条目" : "展开目录后建立索引"; }
+async function resolveMediaUrl(fileUrl: string, sourceOrigin: string): Promise<string> { const path = decodeURIComponent(new URL(fileUrl).pathname); const response = await fetch(`${sourceOrigin}/api/fs/get`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ path, password: "" }) }); if (!response.ok) throw new Error(`HTTP ${response.status}`); const payload = await response.json() as { code?: number; message?: string; data?: { raw_url?: string } }; if (payload.code !== 200 || !payload.data?.raw_url) throw new Error(payload.message || "接口未返回音频地址"); return payload.data.raw_url; }
 function formatSize(bytes: number): string { if (!Number.isFinite(bytes) || bytes <= 0) return ""; const units = ["B", "KB", "MB", "GB", "TB"]; const exponent = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1); return `${(bytes / 1024 ** exponent).toFixed(exponent === 0 ? 0 : 1)} ${units[exponent]}`; }
 function formatTime(value: string): string { const timestamp = Date.parse(value); return Number.isFinite(timestamp) ? new Date(timestamp).toLocaleString() : ""; }
 function csvCell(value: string): string { return /[",\r\n]/.test(value) ? `"${value.replace(/"/g, '""')}"` : value; }

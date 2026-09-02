@@ -12,6 +12,7 @@ export interface PersistedIndexState {
   updatedAt: string;
   entries: DiscoveredEntry[];
   favorites: string[];
+  blacklisted?: string[];
   failures?: FailureRecord[];
   checkpoint?: TreeScanCheckpoint;
   graph?: SerializedGraph;

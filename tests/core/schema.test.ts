@@ -10,6 +10,7 @@ describe("index export schema", () => {
       rootPath: "/asmr",
       entries: [{ url: `${origin}/asmr/a.mp3`, title: "A", type: "content" }],
       favorites: new Set([`${origin}/asmr/a.mp3`]),
+      blacklisted: new Set([`${origin}/asmr/skip`]),
       exportedAt: "2026-08-20T00:00:00.000Z",
     });
     expect(parseIndexExport(exported, origin)).toEqual(exported);
@@ -19,6 +20,12 @@ describe("index export schema", () => {
     const exported = createIndexExport({ sourceOrigin: origin, rootPath: "/", entries: [], favorites: new Set() });
     expect(() => parseIndexExport({ ...exported, schemaVersion: 99 }, origin)).toThrow("schemaVersion");
     expect(() => parseIndexExport(exported, "https://example.com")).toThrow("来源域");
+  });
+
+  it("accepts legacy exports without a blacklist", () => {
+    const exported = createIndexExport({ sourceOrigin: origin, rootPath: "/", entries: [], favorites: new Set() });
+    const { blacklisted: _blacklisted, ...legacy } = exported;
+    expect(parseIndexExport(legacy, origin).blacklisted).toEqual([]);
   });
 
   it("rejects external entry URLs", () => {

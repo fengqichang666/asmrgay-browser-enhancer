@@ -12,6 +12,7 @@ interface ViewerState {
   rootPath: string;
   graph: SerializedGraph;
   favorites: string[];
+  blacklisted?: string[];
   expanded: string[];
 }
 
@@ -20,6 +21,7 @@ class IndexViewer {
   private sourceOrigin = SOURCE_ORIGIN;
   private rootPath = "/";
   private favorites = new Set<string>();
+  private blacklisted = new Set<string>();
   private expanded = new Set<string>();
   private readonly tree = requireElement<HTMLElement>("#tree");
   private readonly status = requireElement<HTMLElement>("#status");
@@ -80,10 +82,12 @@ class IndexViewer {
       if (this.mode.value === "replace" || this.graph.nodes.size === 0) {
         this.graph = incomingGraph;
         this.favorites = new Set(imported.favorites);
+        this.blacklisted = new Set(imported.blacklisted);
         this.expanded.clear();
       } else {
         mergeGraphs(this.graph, incomingGraph);
         this.favorites = new Set([...this.favorites, ...imported.favorites]);
+        this.blacklisted = new Set([...this.blacklisted, ...imported.blacklisted]);
       }
       this.sourceOrigin = imported.sourceOrigin;
       this.rootPath = imported.rootPath;
@@ -107,6 +111,13 @@ class IndexViewer {
       this.render();
       return;
     }
+    const blacklistButton = target.closest<HTMLButtonElement>("[data-blacklist]");
+    if (blacklistButton?.dataset.blacklist) {
+      const url = blacklistButton.dataset.blacklist;
+      const entry = graphEntries(this.graph).find((item) => item.url === url);
+      if (entry) this.toggleBlacklist(entry);
+      return;
+    }
     const toggle = target.closest<HTMLButtonElement>("[data-toggle]");
     if (!toggle?.dataset.toggle) return;
     const url = toggle.dataset.toggle;
@@ -127,7 +138,8 @@ class IndexViewer {
     const entries = graphEntries(this.graph);
     if (query || filter !== "all") {
       const matches = entries.filter((entry) => {
-        const typeMatch = filter === "favorite" ? this.favorites.has(entry.url) : filter === "all" || entry.type === filter;
+        const inBlacklist = this.blacklisted.has(entry.url);
+        const typeMatch = filter === "blacklisted" ? inBlacklist : inBlacklist ? false : filter === "favorite" ? this.favorites.has(entry.url) : filter === "all" || entry.type === filter;
         return typeMatch && (!query || `${entry.title} ${entry.url}`.toLocaleLowerCase().includes(query));
       });
       this.count.textContent = `${matches.length} 项`;
@@ -143,6 +155,7 @@ class IndexViewer {
     const visit = (parentUrl: string, depth: number, ancestors: ReadonlySet<string>): void => {
       for (const node of childrenOf(this.graph, parentUrl)) {
         if (ancestors.has(node.url)) continue;
+        if (this.blacklisted.has(node.url)) continue;
         const expanded = node.type === "directory" && this.expanded.has(node.url);
         fragment.append(this.createRow(node.url, node.title, node.type, depth, expanded));
         visibleCount += 1;
@@ -180,21 +193,61 @@ class IndexViewer {
     favorite.dataset.active = String(this.favorites.has(url));
     favorite.textContent = "★";
     favorite.title = this.favorites.has(url) ? "取消收藏" : "收藏";
-    row.append(toggle, link, favorite);
+    const blacklist = document.createElement("button");
+    blacklist.type = "button";
+    blacklist.className = "blacklist";
+    blacklist.dataset.blacklist = url;
+    blacklist.dataset.active = String(this.blacklisted.has(url));
+    blacklist.textContent = this.blacklisted.has(url) ? "↩" : "⊘";
+    blacklist.title = this.blacklisted.has(url) ? "移出黑名单" : "加入黑名单";
+    blacklist.setAttribute("aria-label", blacklist.title);
+    const actions = document.createElement("span");
+    actions.className = "row-actions";
+    actions.append(favorite, blacklist);
+    row.append(toggle, link, actions);
     return row;
+  }
+
+  private toggleBlacklist(entry: { url: string; title: string }): void {
+    if (this.blacklisted.has(entry.url)) this.blacklisted.delete(entry.url);
+    else {
+      this.blacklisted.add(entry.url);
+      this.removeFromQueue(entry.url);
+    }
+    void this.persist();
+    this.render();
+  }
+
+  private removeFromQueue(url: string): void {
+    const removedIndex = this.queue.findIndex((item) => item.url === url);
+    if (removedIndex < 0) return;
+    const wasCurrent = removedIndex === this.queueIndex;
+    this.queue = this.queue.filter((item) => item.url !== url);
+    if (!this.queue.length) {
+      this.closePlayer();
+      return;
+    }
+    if (removedIndex < this.queueIndex) this.queueIndex -= 1;
+    if (wasCurrent) {
+      this.queueIndex = Math.min(this.queueIndex, this.queue.length - 1);
+      void this.loadCurrentTrack(false);
+    } else {
+      this.playerQueue.textContent = `${this.queueIndex + 1} / ${this.queue.length}${this.queueIsFavorites ? " · 收藏列表" : " · 当前目录"}`;
+      this.renderQueue();
+    }
   }
 
   private playTrack(url: string): void {
     const node = this.graph.nodes.get(url);
-    if (!node || node.type !== "content") return;
+    if (!node || node.type !== "content" || this.blacklisted.has(url)) return;
     const parent = [...this.graph.edges.values()].find((edge) => edge.childId === url)?.parentId;
-    const queue = parent ? childrenOf(this.graph, parent).filter((item) => item.type === "content" && item.status === "active") : [node];
+    const queue = parent ? childrenOf(this.graph, parent).filter((item) => item.type === "content" && item.status === "active" && !this.blacklisted.has(item.url)) : [node];
     this.queueIsFavorites = false;
     this.setQueue(queue.length ? queue : [node], url);
   }
 
   private playFavorites(): void {
-    const queue = [...this.graph.nodes.values()].filter((node) => node.type === "content" && node.status === "active" && this.favorites.has(node.url));
+    const queue = [...this.graph.nodes.values()].filter((node) => node.type === "content" && node.status === "active" && this.favorites.has(node.url) && !this.blacklisted.has(node.url));
     if (!queue.length) { this.status.textContent = "暂无收藏音频"; return; }
     this.queueIsFavorites = true;
     this.setQueue(queue, queue[0]!.url);
@@ -308,6 +361,7 @@ class IndexViewer {
         this.sourceOrigin = state.sourceOrigin;
         this.rootPath = state.rootPath;
         this.favorites = new Set(state.favorites);
+        this.blacklisted = new Set(state.blacklisted ?? []);
         this.expanded = new Set(state.expanded);
         this.status.textContent = `已恢复 ${graphEntries(this.graph).length} 项本地索引`;
       }
@@ -316,7 +370,7 @@ class IndexViewer {
   }
 
   private async persist(): Promise<void> {
-    await saveState({ sourceOrigin: this.sourceOrigin, rootPath: this.rootPath, graph: serializeGraph(this.graph), favorites: [...this.favorites], expanded: [...this.expanded] });
+    await saveState({ sourceOrigin: this.sourceOrigin, rootPath: this.rootPath, graph: serializeGraph(this.graph), favorites: [...this.favorites], blacklisted: [...this.blacklisted], expanded: [...this.expanded] });
   }
 }
 

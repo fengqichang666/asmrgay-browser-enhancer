@@ -188,6 +188,7 @@
     if (!Array.isArray(value.entries)) throw new Error("entries \u5FC5\u987B\u662F\u6570\u7EC4");
     if (value.entries.length > MAX_IMPORT_ENTRIES) throw new Error(`entries \u8D85\u8FC7 ${MAX_IMPORT_ENTRIES} \u9879\u4E0A\u9650`);
     if (!Array.isArray(value.favorites)) throw new Error("favorites \u5FC5\u987B\u662F\u6570\u7EC4");
+    if (value.blacklisted !== void 0 && !Array.isArray(value.blacklisted)) throw new Error("blacklisted \u5FC5\u987B\u662F\u6570\u7EC4");
     const graph = parseGraph(value.graph, sourceOrigin);
     const desktopState = parseDesktopState(value.desktopState, sourceOrigin);
     return {
@@ -199,6 +200,10 @@
       entries: value.entries.map((entry) => parseEntry(entry, sourceOrigin)),
       favorites: value.favorites.map((url) => {
         if (typeof url !== "string") throw new Error("favorites \u542B\u6709\u975E\u5B57\u7B26\u4E32\u5730\u5740");
+        return normalizeSameOriginUrl(url, sourceOrigin);
+      }),
+      blacklisted: (value.blacklisted ?? []).map((url) => {
+        if (typeof url !== "string") throw new Error("blacklisted \u542B\u6709\u975E\u5B57\u7B26\u4E32\u5730\u5740");
         return normalizeSameOriginUrl(url, sourceOrigin);
       }),
       ...graph ? { graph } : {},
@@ -309,6 +314,7 @@
     sourceOrigin = SOURCE_ORIGIN;
     rootPath = "/";
     favorites = /* @__PURE__ */ new Set();
+    blacklisted = /* @__PURE__ */ new Set();
     expanded = /* @__PURE__ */ new Set();
     tree = requireElement("#tree");
     status = requireElement("#status");
@@ -371,10 +377,12 @@
         if (this.mode.value === "replace" || this.graph.nodes.size === 0) {
           this.graph = incomingGraph;
           this.favorites = new Set(imported.favorites);
+          this.blacklisted = new Set(imported.blacklisted);
           this.expanded.clear();
         } else {
           mergeGraphs(this.graph, incomingGraph);
           this.favorites = /* @__PURE__ */ new Set([...this.favorites, ...imported.favorites]);
+          this.blacklisted = /* @__PURE__ */ new Set([...this.blacklisted, ...imported.blacklisted]);
         }
         this.sourceOrigin = imported.sourceOrigin;
         this.rootPath = imported.rootPath;
@@ -398,6 +406,13 @@
         this.render();
         return;
       }
+      const blacklistButton = target.closest("[data-blacklist]");
+      if (blacklistButton?.dataset.blacklist) {
+        const url2 = blacklistButton.dataset.blacklist;
+        const entry = graphEntries(this.graph).find((item) => item.url === url2);
+        if (entry) this.toggleBlacklist(entry);
+        return;
+      }
       const toggle = target.closest("[data-toggle]");
       if (!toggle?.dataset.toggle) return;
       const url = toggle.dataset.toggle;
@@ -418,7 +433,8 @@
       const entries = graphEntries(this.graph);
       if (query || filter !== "all") {
         const matches = entries.filter((entry) => {
-          const typeMatch = filter === "favorite" ? this.favorites.has(entry.url) : filter === "all" || entry.type === filter;
+          const inBlacklist = this.blacklisted.has(entry.url);
+          const typeMatch = filter === "blacklisted" ? inBlacklist : inBlacklist ? false : filter === "favorite" ? this.favorites.has(entry.url) : filter === "all" || entry.type === filter;
           return typeMatch && (!query || `${entry.title} ${entry.url}`.toLocaleLowerCase().includes(query));
         });
         this.count.textContent = `${matches.length} \u9879`;
@@ -434,6 +450,7 @@
       const visit = (parentUrl, depth, ancestors) => {
         for (const node of childrenOf(this.graph, parentUrl)) {
           if (ancestors.has(node.url)) continue;
+          if (this.blacklisted.has(node.url)) continue;
           const expanded = node.type === "directory" && this.expanded.has(node.url);
           fragment.append(this.createRow(node.url, node.title, node.type, depth, expanded));
           visibleCount += 1;
@@ -481,19 +498,57 @@
       favorite.dataset.active = String(this.favorites.has(url));
       favorite.textContent = "\u2605";
       favorite.title = this.favorites.has(url) ? "\u53D6\u6D88\u6536\u85CF" : "\u6536\u85CF";
-      row.append(toggle, link, favorite);
+      const blacklist = document.createElement("button");
+      blacklist.type = "button";
+      blacklist.className = "blacklist";
+      blacklist.dataset.blacklist = url;
+      blacklist.dataset.active = String(this.blacklisted.has(url));
+      blacklist.textContent = this.blacklisted.has(url) ? "\u21A9" : "\u2298";
+      blacklist.title = this.blacklisted.has(url) ? "\u79FB\u51FA\u9ED1\u540D\u5355" : "\u52A0\u5165\u9ED1\u540D\u5355";
+      blacklist.setAttribute("aria-label", blacklist.title);
+      const actions = document.createElement("span");
+      actions.className = "row-actions";
+      actions.append(favorite, blacklist);
+      row.append(toggle, link, actions);
       return row;
+    }
+    toggleBlacklist(entry) {
+      if (this.blacklisted.has(entry.url)) this.blacklisted.delete(entry.url);
+      else {
+        this.blacklisted.add(entry.url);
+        this.removeFromQueue(entry.url);
+      }
+      void this.persist();
+      this.render();
+    }
+    removeFromQueue(url) {
+      const removedIndex = this.queue.findIndex((item) => item.url === url);
+      if (removedIndex < 0) return;
+      const wasCurrent = removedIndex === this.queueIndex;
+      this.queue = this.queue.filter((item) => item.url !== url);
+      if (!this.queue.length) {
+        this.closePlayer();
+        return;
+      }
+      if (removedIndex < this.queueIndex) this.queueIndex -= 1;
+      if (wasCurrent) {
+        this.queueIndex = Math.min(this.queueIndex, this.queue.length - 1);
+        void this.loadCurrentTrack(false);
+      } else {
+        this.playerQueue.textContent = `${this.queueIndex + 1} / ${this.queue.length}${this.queueIsFavorites ? " \xB7 \u6536\u85CF\u5217\u8868" : " \xB7 \u5F53\u524D\u76EE\u5F55"}`;
+        this.renderQueue();
+      }
     }
     playTrack(url) {
       const node = this.graph.nodes.get(url);
-      if (!node || node.type !== "content") return;
+      if (!node || node.type !== "content" || this.blacklisted.has(url)) return;
       const parent = [...this.graph.edges.values()].find((edge) => edge.childId === url)?.parentId;
-      const queue = parent ? childrenOf(this.graph, parent).filter((item) => item.type === "content" && item.status === "active") : [node];
+      const queue = parent ? childrenOf(this.graph, parent).filter((item) => item.type === "content" && item.status === "active" && !this.blacklisted.has(item.url)) : [node];
       this.queueIsFavorites = false;
       this.setQueue(queue.length ? queue : [node], url);
     }
     playFavorites() {
-      const queue = [...this.graph.nodes.values()].filter((node) => node.type === "content" && node.status === "active" && this.favorites.has(node.url));
+      const queue = [...this.graph.nodes.values()].filter((node) => node.type === "content" && node.status === "active" && this.favorites.has(node.url) && !this.blacklisted.has(node.url));
       if (!queue.length) {
         this.status.textContent = "\u6682\u65E0\u6536\u85CF\u97F3\u9891";
         return;
@@ -609,6 +664,7 @@
           this.sourceOrigin = state.sourceOrigin;
           this.rootPath = state.rootPath;
           this.favorites = new Set(state.favorites);
+          this.blacklisted = new Set(state.blacklisted ?? []);
           this.expanded = new Set(state.expanded);
           this.status.textContent = `\u5DF2\u6062\u590D ${graphEntries(this.graph).length} \u9879\u672C\u5730\u7D22\u5F15`;
         }
@@ -618,7 +674,7 @@
       this.render();
     }
     async persist() {
-      await saveState({ sourceOrigin: this.sourceOrigin, rootPath: this.rootPath, graph: serializeGraph(this.graph), favorites: [...this.favorites], expanded: [...this.expanded] });
+      await saveState({ sourceOrigin: this.sourceOrigin, rootPath: this.rootPath, graph: serializeGraph(this.graph), favorites: [...this.favorites], blacklisted: [...this.blacklisted], expanded: [...this.expanded] });
     }
   };
   function graphFromEntries(origin, rootPath, entries) {
