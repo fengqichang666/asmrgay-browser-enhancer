@@ -242,3 +242,21 @@ export function setNodeType(graph: IndexGraph, url: string, type: NodeType): voi
     node.metadata = { ...node.metadata, manuallyClassified: true };
   }
 }
+
+export function removeNodes(graph: IndexGraph, urls: ReadonlySet<string>): Set<string> {
+  const removed = new Set<string>();
+  const queue = [...urls].map((url) => normalizeUrl(url));
+  while (queue.length > 0) {
+    const id = queue.pop();
+    if (!id || removed.has(id) || !graph.nodes.has(id)) continue;
+    removed.add(id);
+    for (const edge of graph.edges.values()) {
+      if (edge.parentId === id) queue.push(edge.childId);
+    }
+  }
+  for (const [edgeId, edge] of graph.edges) {
+    if (removed.has(edge.parentId) || removed.has(edge.childId)) graph.edges.delete(edgeId);
+  }
+  for (const id of removed) graph.nodes.delete(id);
+  return removed;
+}

@@ -201,10 +201,27 @@
       node.metadata = { ...node.metadata, manuallyClassified: true };
     }
   }
+  function removeNodes(graph, urls) {
+    const removed = /* @__PURE__ */ new Set();
+    const queue = [...urls].map((url) => normalizeUrl(url));
+    while (queue.length > 0) {
+      const id = queue.pop();
+      if (!id || removed.has(id) || !graph.nodes.has(id)) continue;
+      removed.add(id);
+      for (const edge of graph.edges.values()) {
+        if (edge.parentId === id) queue.push(edge.childId);
+      }
+    }
+    for (const [edgeId, edge] of graph.edges) {
+      if (removed.has(edge.parentId) || removed.has(edge.childId)) graph.edges.delete(edgeId);
+    }
+    for (const id of removed) graph.nodes.delete(id);
+    return removed;
+  }
 
   // src/core/schema.ts
   var INDEX_SCHEMA_VERSION = 1;
-  var MAX_IMPORT_ENTRIES = 2e4;
+  var MAX_IMPORT_ENTRIES = 5e4;
   function createIndexExport(input) {
     const sourceOrigin = normalizeOrigin(input.sourceOrigin);
     return {
@@ -466,6 +483,210 @@
     return error instanceof DOMException && error.name === "AbortError";
   }
 
+  // src/scanner/tree.ts
+  var TreeScanController = class {
+    abortController = new AbortController();
+    paused = false;
+    stopped = false;
+    resumeWaiters = [];
+    pause() {
+      if (!this.stopped) this.paused = true;
+    }
+    resume() {
+      this.paused = false;
+      for (const resolve of this.resumeWaiters.splice(0)) resolve();
+    }
+    stop() {
+      this.stopped = true;
+      this.resume();
+      this.abortController.abort(new DOMException("\u626B\u63CF\u5DF2\u505C\u6B62", "AbortError"));
+    }
+    async run(rootPath, options = {}) {
+      const maxDepth = clampInteger(options.maxDepth ?? 1, 1, 10);
+      const maxNodes = clampInteger(options.maxNodes ?? 2e3, 1, 5e4);
+      const maxDirectories = clampInteger(options.maxDirectories ?? 100, 1, 2e3);
+      const scanDirectory = options.scanDirectory ?? scanAListDirectory;
+      const resume = options.resumeFrom;
+      const frontier = resume ? [...resume.frontier] : [{ path: normalizePath(rootPath), depth: 0 }];
+      const visitedDirectories = new Set(resume?.visitedDirectories ?? []);
+      const entries = new Map((resume?.entries ?? []).map((entry) => [entry.url, entry]));
+      const failures = [...resume?.failures ?? []];
+      let directoriesScanned = resume?.directoriesScanned ?? 0;
+      let truncated = false;
+      let hasScannedDirectory = directoriesScanned > 0;
+      while (frontier.length > 0 && !this.stopped) {
+        await this.waitWhilePaused();
+        if (this.stopped) break;
+        if (directoriesScanned >= maxDirectories || entries.size >= maxNodes) {
+          truncated = true;
+          break;
+        }
+        const current = frontier.shift();
+        if (!current || visitedDirectories.has(current.path)) continue;
+        visitedDirectories.add(current.path);
+        this.emitProgress(options, "running", current.path, directoriesScanned, frontier.length, entries.size, maxDepth);
+        if (hasScannedDirectory) {
+          try {
+            await waitWithJitter2(options.directoryDelayMs ?? 0, options.directoryJitterMs ?? 0, this.abortController.signal);
+          } catch (error) {
+            if (this.stopped || isAbortError2(error)) {
+              visitedDirectories.delete(current.path);
+              frontier.unshift(current);
+              break;
+            }
+            throw error;
+          }
+        }
+        hasScannedDirectory = true;
+        let result;
+        try {
+          result = await scanDirectory(current.path, {
+            ...options.directoryOptions,
+            signal: this.abortController.signal,
+            onFailure: (failure) => failures.push(failure)
+          });
+        } catch (error) {
+          if (this.stopped || isAbortError2(error)) {
+            visitedDirectories.delete(current.path);
+            frontier.unshift(current);
+            break;
+          }
+          if (isRateLimitError(error)) {
+            visitedDirectories.delete(current.path);
+            frontier.unshift(current);
+            truncated = true;
+            break;
+          }
+          visitedDirectories.delete(current.path);
+          frontier.unshift(current);
+          failures.push({
+            path: current.path,
+            kind: "permanent",
+            message: error instanceof Error ? error.message : "\u76EE\u5F55\u626B\u63CF\u5931\u8D25",
+            attempts: 1,
+            occurredAt: (/* @__PURE__ */ new Date()).toISOString()
+          });
+          this.paused = true;
+          this.emitProgress(options, "paused", current.path, directoriesScanned, frontier.length, entries.size, maxDepth);
+          await this.emitCheckpoint(options, rootPath, maxDepth, maxNodes, maxDirectories, frontier, visitedDirectories, entries, failures, directoriesScanned);
+          continue;
+        }
+        directoriesScanned += 1;
+        truncated ||= result.truncated;
+        const batch = [];
+        for (const entry of result.entries) {
+          if (entries.size >= maxNodes) {
+            truncated = true;
+            break;
+          }
+          const enriched = {
+            ...entry,
+            metadata: {
+              ...entry.metadata,
+              depth: current.depth + 1,
+              parentPath: current.path,
+              scanRootPath: normalizePath(rootPath)
+            }
+          };
+          if (!entries.has(entry.url)) batch.push(enriched);
+          entries.set(entry.url, enriched);
+          if (entry.type === "directory" && current.depth + 1 < maxDepth) {
+            const childPath = pathFromUrl(entry.url);
+            if (!visitedDirectories.has(childPath)) {
+              frontier.push({ path: childPath, depth: current.depth + 1 });
+            }
+          }
+        }
+        if (batch.length > 0) options.onEntries?.(batch);
+        options.onDirectoryScanned?.(current.path, result.entries.map((entry) => ({
+          ...entry,
+          metadata: {
+            ...entry.metadata,
+            depth: current.depth + 1,
+            parentPath: current.path,
+            scanRootPath: normalizePath(rootPath)
+          }
+        })));
+        await this.emitCheckpoint(options, rootPath, maxDepth, maxNodes, maxDirectories, frontier, visitedDirectories, entries, failures, directoriesScanned);
+        this.emitProgress(options, this.paused ? "paused" : "running", current.path, directoriesScanned, frontier.length, entries.size, maxDepth);
+      }
+      const state = this.stopped ? "stopped" : "completed";
+      this.emitProgress(options, state, "", directoriesScanned, frontier.length, entries.size, maxDepth);
+      const checkpoint = frontier.length > 0 ? this.createCheckpoint(rootPath, maxDepth, maxNodes, maxDirectories, frontier, visitedDirectories, entries, failures, directoriesScanned) : void 0;
+      return {
+        entries: [...entries.values()],
+        directoriesScanned,
+        truncated,
+        stopped: this.stopped,
+        failures,
+        ...checkpoint ? { checkpoint } : {}
+      };
+    }
+    async emitCheckpoint(options, rootPath, maxDepth, maxNodes, maxDirectories, frontier, visitedDirectories, entries, failures, directoriesScanned) {
+      if (!options.onCheckpoint) return;
+      await options.onCheckpoint(this.createCheckpoint(rootPath, maxDepth, maxNodes, maxDirectories, frontier, visitedDirectories, entries, failures, directoriesScanned));
+    }
+    createCheckpoint(rootPath, maxDepth, maxNodes, maxDirectories, frontier, visitedDirectories, entries, failures, directoriesScanned) {
+      return {
+        rootPath: normalizePath(rootPath),
+        maxDepth,
+        maxNodes,
+        maxDirectories,
+        frontier: [...frontier],
+        visitedDirectories: [...visitedDirectories],
+        entries: [...entries.values()],
+        failures: [...failures],
+        directoriesScanned,
+        updatedAt: (/* @__PURE__ */ new Date()).toISOString()
+      };
+    }
+    async waitWhilePaused() {
+      if (!this.paused || this.stopped) return;
+      await new Promise((resolve) => this.resumeWaiters.push(resolve));
+    }
+    emitProgress(options, state, currentPath2, directoriesScanned, directoriesQueued, entriesDiscovered, maxDepth) {
+      options.onProgress?.({
+        state,
+        currentPath: currentPath2,
+        directoriesScanned,
+        directoriesQueued,
+        entriesDiscovered,
+        maxDepth
+      });
+    }
+  };
+  function pathFromUrl(url) {
+    return normalizePath(new URL(url).pathname);
+  }
+  function normalizePath(path) {
+    try {
+      const decoded = decodeURIComponent(path);
+      return decoded.startsWith("/") ? decoded : `/${decoded}`;
+    } catch {
+      return path.startsWith("/") ? path : `/${path}`;
+    }
+  }
+  function clampInteger(value, minimum, maximum) {
+    return Math.min(maximum, Math.max(minimum, Math.trunc(value)));
+  }
+  function isAbortError2(error) {
+    return error instanceof DOMException && error.name === "AbortError";
+  }
+  function isRateLimitError(error) {
+    return error instanceof Error && /Cloudflare\s+1015|rate limited|HTTP 429/i.test(error.message);
+  }
+  async function waitWithJitter2(delayMs, jitterMs, signal) {
+    const duration = Math.max(0, Math.trunc(delayMs)) + Math.floor(Math.random() * (Math.max(0, Math.trunc(jitterMs)) + 1));
+    if (duration === 0) return;
+    await new Promise((resolve, reject) => {
+      const timeout = setTimeout(resolve, duration);
+      signal.addEventListener("abort", () => {
+        clearTimeout(timeout);
+        reject(signal.reason ?? new DOMException("\u626B\u63CF\u5DF2\u505C\u6B62", "AbortError"));
+      }, { once: true });
+    });
+  }
+
   // src/storage/index-store.ts
   var DATABASE_NAME = "asmrgay-browser-enhancer";
   var DATABASE_VERSION = 1;
@@ -538,9 +759,9 @@
   .abe-launcher:hover { background: #0f568e; }
   .abe-panel {
     position: fixed; top: 0; left: 0; bottom: 0; z-index: 2147483647;
-    width: min(460px, 100vw); background: #f7f8fa; color: #20242a;
+    width: min(var(--abe-panel-width, 560px), 100vw); background: #f7f8fa; color: #20242a;
     border-right: 1px solid #cfd5dc; box-shadow: 8px 0 28px rgba(0,0,0,.18);
-    display: grid; grid-template-rows: auto auto auto auto minmax(0, 1fr) auto; font: 14px/1.4 system-ui, sans-serif;
+    display: grid; grid-template-rows: auto auto auto auto auto minmax(0, 1fr) auto; font: 14px/1.4 system-ui, sans-serif;
   }
   .abe-hidden { display: none !important; }
   .abe-header { display: flex; align-items: center; gap: 10px; padding: 12px 14px; background: #fff; border-bottom: 1px solid #dfe3e8; }
@@ -562,9 +783,18 @@
   .abe-data-actions { position: absolute; top: calc(100% + 6px); right: 0; z-index: 10; width: 300px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; padding: 9px; background: #fff; border: 1px solid #cbd2d9; border-radius: 7px; box-shadow: 0 8px 24px rgba(0,0,0,.18); }
   .abe-secondary { min-height: 30px; border: 1px solid #bac3cc; border-radius: 5px; background: #fff; color: #303942; padding: 4px 7px; cursor: pointer; }
   .abe-secondary:hover { background: #edf1f5; }
+  .abe-secondary:disabled { opacity: .55; cursor: default; }
+  .abe-auto-scan { background: #f4f7f9; border-bottom: 1px solid #dfe3e8; }
+  .abe-auto-scan summary { padding: 7px 10px; color: #303942; cursor: pointer; font-weight: 600; }
+  .abe-auto-scan-body { display: grid; gap: 7px; padding: 0 10px 9px; }
+  .abe-auto-scan-fields { display: grid; grid-template-columns: minmax(0, 1fr) 108px; gap: 7px; }
+  .abe-auto-scan-fields label { display: grid; gap: 3px; color: #69717c; font-size: 12px; }
+  .abe-auto-scan-fields input { width: 100%; min-height: 30px; border: 1px solid #bcc5cf; border-radius: 5px; background: #fff; color: #20242a; padding: 4px 7px; }
+  .abe-auto-scan-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+  .abe-scan-progress { color: #69717c; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .abe-import-mode { min-height: 30px; border: 1px solid #bac3cc; border-radius: 5px; background: #fff; color: #303942; padding: 4px 6px; }
   .abe-clear { color: #9b2f2f; border-color: #d7b5b5; }
-  .abe-controls { display: grid; grid-template-columns: 1fr 100px; gap: 7px; padding: 7px 10px; background: #fff; border-bottom: 1px solid #dfe3e8; }
+  .abe-controls { display: grid; grid-template-columns: minmax(0, 1fr) 100px auto auto; gap: 7px; padding: 7px 10px; background: #fff; border-bottom: 1px solid #dfe3e8; }
   .abe-controls input, .abe-controls select { width: 100%; min-height: 32px; border: 1px solid #bcc5cf; border-radius: 5px; background: white; color: #20242a; padding: 5px 8px; }
   .abe-breadcrumbs { padding: 7px 14px; background: #fff; border-bottom: 1px solid #e0e4e8; white-space: nowrap; overflow-x: auto; }
   .abe-breadcrumbs button { border: 0; background: transparent; color: #1769aa; padding: 2px 0; cursor: pointer; }
@@ -575,17 +805,22 @@
   .abe-tree-error { color: #a13b35; background: #fff6f5; padding-top: 14px; }
   .abe-tree-error:hover { background: #fbeae8; }
   .abe-list { overflow: auto; overflow-anchor: none; padding: 6px 0; }
+  .abe-resize-handle { position: absolute; top: 0; right: -4px; bottom: 0; z-index: 2; width: 8px; cursor: col-resize; touch-action: none; }
+  .abe-resize-handle::after { content: ""; position: absolute; top: 50%; left: 3px; width: 2px; height: 48px; transform: translateY(-50%); border-radius: 2px; background: #c7d0d8; opacity: 0; transition: opacity .15s ease; }
+  .abe-resize-handle:hover::after, .abe-resize-handle:focus-visible::after, .abe-resize-handle.abe-resizing::after { opacity: 1; }
   .abe-empty { padding: 32px 20px; text-align: center; color: #69717c; }
   .abe-player { padding: 10px; border-top: 1px solid #cbd5df; background: #fff; box-shadow: 0 -3px 12px rgba(0,0,0,.08); }
   .abe-player-top { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
   .abe-player-title { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
   .abe-player .abe-icon-button { flex: 0 0 auto; width: 28px; height: 28px; }
   .abe-audio { display: block; width: 100%; height: 36px; }
-  .abe-row { display: grid; grid-template-columns: 28px minmax(0,1fr) 98px; align-items: center; min-height: 48px; padding: 4px 10px 4px 14px; border-bottom: 1px solid #e5e8ec; background: #fff; content-visibility: auto; contain-intrinsic-size: 48px; }
+  .abe-row { display: grid; grid-template-columns: 28px minmax(0,1fr) 160px; align-items: center; min-height: 48px; padding: 4px 10px 4px 14px; border-bottom: 1px solid #e5e8ec; background: #fff; content-visibility: auto; contain-intrinsic-size: 48px; }
+  .abe-row.abe-selecting { grid-template-columns: 20px 28px minmax(0,1fr) 160px; }
   .abe-row:hover { background: #f0f5f9; }
   .abe-kind { width: 28px; height: 36px; border: 0; background: transparent; color: #68727d; padding: 0; font-size: 18px; cursor: default; }
   .abe-kind[data-action="expand"] { cursor: pointer; }
   .abe-kind[data-action="expand"]:hover { color: #1769aa; background: #e5eef5; border-radius: 4px; }
+  .abe-select-checkbox { width: 16px; height: 16px; margin: 0; }
   .abe-link { min-width: 0; color: #165f9b; text-decoration: none; }
   .abe-name { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .abe-meta { display: block; color: #747d87; font-size: 12px; }
@@ -594,19 +829,34 @@
   .abe-blacklist { border: 0; background: transparent; color: #8a929b; width: 28px; height: 32px; cursor: pointer; font-size: 18px; }
   .abe-blacklist[data-active="true"] { color: #b43d3d; }
   .abe-row-actions { display: flex; align-items: center; justify-content: flex-end; gap: 3px; }
+  .abe-refresh-directory { border: 0; background: transparent; color: #7a848d; width: 28px; height: 32px; cursor: pointer; font-size: 18px; }
+  .abe-refresh-directory:hover, .abe-refresh-directory:focus-visible { color: #1769aa; background: #e5eef5; border-radius: 4px; }
+  .abe-refresh-directory:disabled { color: #b4bcc4; cursor: default; }
+  .abe-select-root { border: 0; background: transparent; color: #7a848d; width: 28px; height: 32px; cursor: pointer; font-size: 17px; }
+  .abe-select-root:hover, .abe-select-root:focus-visible { color: #1769aa; background: #e5eef5; border-radius: 4px; }
+  .abe-select-root:disabled { color: #c3c9ce; cursor: default; }
   .abe-reclassify { border: 0; background: transparent; color: #7a848d; width: 28px; height: 32px; cursor: pointer; font-size: 16px; }
   @media (max-width: 520px) {
     .abe-launcher { left: 12px; bottom: 72px; }
     .abe-panel { width: 100vw; }
+    .abe-resize-handle { display: none; }
     .abe-status { display: none; }
+    .abe-controls { grid-template-columns: minmax(0, 1fr) 100px; }
     .abe-toolbar { grid-template-columns: auto 1fr auto; }
     .abe-progress { justify-self: end; }
+    .abe-auto-scan-fields { grid-template-columns: minmax(0, 1fr) 96px; }
   }
 `;
 
   // src/userscript/main.ts
   var FAVORITES_KEY = "asmrgay-enhancer:favorites:v1";
+  var PANEL_WIDTH_KEY = "asmrgay-enhancer:panel-width:v1";
   var MAX_IMPORT_BYTES = 20 * 1024 * 1024;
+  var AUTO_SCAN_DEFAULT_INTERVAL_MS = 3e4;
+  var AUTO_SCAN_MIN_INTERVAL_MS = 500;
+  var PANEL_WIDTH_DEFAULT = 560;
+  var PANEL_WIDTH_MIN = 360;
+  var PANEL_WIDTH_MAX = 1200;
   var OnDemandPanel = class {
     root;
     panel;
@@ -616,6 +866,9 @@
     pathLabel;
     searchInput;
     typeSelect;
+    autoScanRootInput;
+    autoScanIntervalInput;
+    autoScanProgress;
     player;
     playerTitle;
     audio;
@@ -634,9 +887,20 @@
     directoryLoadedAt = /* @__PURE__ */ new Map();
     pendingRefreshChildren = /* @__PURE__ */ new Map();
     blacklistPending = /* @__PURE__ */ new Set();
+    selectionMode = false;
+    selectedUrls = /* @__PURE__ */ new Set();
+    bulkBlacklistPending = false;
+    bulkDeletePending = false;
     expandedDirectories = /* @__PURE__ */ new Set();
     visibleRows = [];
     audioRequestId = 0;
+    autoScanController;
+    autoScanState = "idle";
+    autoScanCheckpoint;
+    autoScanRootPath = currentPath();
+    autoScanIntervalMs = AUTO_SCAN_DEFAULT_INTERVAL_MS;
+    autoScanFailureCount = 0;
+    panelWidth = readPanelWidth();
     constructor() {
       const host = document.createElement("div");
       host.id = "asmrgay-browser-enhancer";
@@ -644,12 +908,18 @@
       this.root = host.attachShadow({ mode: "open" });
       this.root.innerHTML = this.template();
       this.panel = this.requireElement(".abe-panel");
+      this.setPanelWidth(this.panelWidth, false);
       this.list = this.requireElement(".abe-list");
       this.status = this.requireElement(".abe-status");
       this.count = this.requireElement(".abe-count");
       this.pathLabel = this.requireElement(".abe-path");
       this.searchInput = this.requireElement(".abe-search");
       this.typeSelect = this.requireElement(".abe-type");
+      this.autoScanRootInput = this.requireElement(".abe-scan-root");
+      this.autoScanIntervalInput = this.requireElement(".abe-scan-interval");
+      this.autoScanProgress = this.requireElement(".abe-scan-progress");
+      this.autoScanRootInput.value = this.autoScanRootPath;
+      this.autoScanIntervalInput.value = String(this.autoScanIntervalMs / 1e3);
       this.player = document.createElement("section");
       this.player.className = "abe-player abe-hidden";
       this.player.setAttribute("aria-label", "\u97F3\u9891\u64AD\u653E\u5668");
@@ -667,8 +937,9 @@
       <section class="abe-panel abe-hidden" aria-label="ASMRGay \u6309\u9700\u76EE\u5F55\u7D22\u5F15">
         <header class="abe-header"><div class="abe-title"><strong>\u6309\u9700\u76EE\u5F55\u7D22\u5F15</strong><span class="abe-path"></span></div><button class="abe-icon-button abe-close" type="button" aria-label="\u5173\u95ED">\xD7</button></header>
         <div class="abe-toolbar"><button class="abe-primary abe-refresh" type="button" title="\u91CD\u65B0\u8BF7\u6C42\u5F53\u524D\u76EE\u5F55\u7B2C\u4E00\u9875">\u21BB \u5237\u65B0</button><span class="abe-status">\u4EC5\u5728\u5C55\u5F00\u6216\u5237\u65B0\u65F6\u8BF7\u6C42</span><span class="abe-progress"><span class="abe-count"></span> \u9879</span><details class="abe-data-menu"><summary>\u6570\u636E</summary><div class="abe-data-actions"><button type="button" class="abe-secondary abe-export">\u5BFC\u51FA\u7D22\u5F15</button><button type="button" class="abe-secondary abe-export-favorites">\u6536\u85CF JSON</button><button type="button" class="abe-secondary abe-export-csv">\u6536\u85CF CSV</button><select class="abe-import-mode" aria-label="\u5BFC\u5165\u6A21\u5F0F"><option value="merge">\u5408\u5E76\u5BFC\u5165</option><option value="replace">\u66FF\u6362\u5BFC\u5165</option></select><button type="button" class="abe-secondary abe-import">\u5BFC\u5165\u7D22\u5F15</button><button type="button" class="abe-secondary abe-failures">\u5931\u8D25\u65E5\u5FD7</button><button type="button" class="abe-secondary abe-clear">\u6E05\u7A7A\u7D22\u5F15</button><input class="abe-file abe-hidden" type="file" accept="application/json,.json"></div></details></div>
-        <div class="abe-controls"><input class="abe-search" type="search" placeholder="\u641C\u7D22\u5DF2\u52A0\u8F7D\u76EE\u5F55"><select class="abe-type"><option value="all">\u5168\u90E8</option><option value="directory">\u76EE\u5F55</option><option value="content">\u6587\u4EF6</option><option value="favorite">\u6536\u85CF</option><option value="seen">\u5DF2\u770B</option><option value="unseen">\u672A\u770B</option><option value="blacklisted">\u9ED1\u540D\u5355</option></select></div>
-        <nav class="abe-breadcrumbs"></nav><div class="abe-list"><div class="abe-empty">\u5C55\u5F00\u76EE\u5F55\u540E\u5EFA\u7ACB\u7D22\u5F15</div></div>
+        <details class="abe-auto-scan"><summary>\u81EA\u52A8\u9012\u5F52\u626B\u63CF</summary><div class="abe-auto-scan-body"><div class="abe-auto-scan-fields"><label>\u6839\u76EE\u5F55<input class="abe-scan-root" type="text" inputmode="url" spellcheck="false" aria-label="\u81EA\u52A8\u626B\u63CF\u6839\u76EE\u5F55"></label><label>\u95F4\u9694\uFF08\u79D2\uFF09<input class="abe-scan-interval" type="number" min="0.5" max="3600" step="0.5" aria-label="\u81EA\u52A8\u626B\u63CF\u8BF7\u6C42\u95F4\u9694"></label></div><div class="abe-auto-scan-actions"><button class="abe-primary abe-scan-start" type="button">\u5F00\u59CB\u626B\u63CF</button><button class="abe-secondary abe-scan-pause" type="button" disabled>\u6682\u505C</button><button class="abe-secondary abe-scan-resume" type="button" disabled>\u7EE7\u7EED</button><button class="abe-secondary abe-scan-stop" type="button" disabled>\u505C\u6B62</button></div><span class="abe-scan-progress">\u672A\u5F00\u59CB</span></div></details>
+        <div class="abe-controls"><input class="abe-search" type="search" placeholder="\u641C\u7D22\u5DF2\u52A0\u8F7D\u76EE\u5F55"><select class="abe-type"><option value="all">\u5168\u90E8</option><option value="directory">\u76EE\u5F55</option><option value="content">\u6587\u4EF6</option><option value="favorite">\u6536\u85CF</option><option value="seen">\u5DF2\u770B</option><option value="unseen">\u672A\u770B</option><option value="blacklisted">\u9ED1\u540D\u5355</option></select><button type="button" class="abe-secondary abe-multi-select" aria-pressed="false">\u591A\u9009</button><button type="button" class="abe-secondary abe-blacklist-selected abe-hidden" disabled>\u62C9\u9ED1\u9009\u4E2D</button><button type="button" class="abe-secondary abe-delete-selected abe-hidden" disabled>\u5220\u9664\u7F13\u5B58</button></div>
+        <nav class="abe-breadcrumbs"></nav><div class="abe-list"><div class="abe-empty">\u5C55\u5F00\u76EE\u5F55\u540E\u5EFA\u7ACB\u7D22\u5F15</div></div><div class="abe-resize-handle" role="separator" aria-label="\u62D6\u52A8\u8C03\u6574\u9762\u677F\u5BBD\u5EA6" aria-orientation="vertical" tabindex="0"></div>
       </section>`;
     }
     bindEvents() {
@@ -678,9 +949,24 @@
       });
       this.requireElement(".abe-close").addEventListener("click", () => this.panel.classList.add("abe-hidden"));
       this.requireElement(".abe-refresh").addEventListener("click", () => void this.ensureDirectory(this.selectedDirectory, true));
-      this.searchInput.addEventListener("input", () => this.render());
-      this.typeSelect.addEventListener("change", () => this.render());
+      this.requireElement(".abe-scan-start").addEventListener("click", () => void this.startAutoScan());
+      this.requireElement(".abe-scan-pause").addEventListener("click", () => this.pauseAutoScan());
+      this.requireElement(".abe-scan-resume").addEventListener("click", () => this.resumeAutoScan());
+      this.requireElement(".abe-scan-stop").addEventListener("click", () => this.stopAutoScan());
+      this.bindPanelResize();
+      this.searchInput.addEventListener("input", () => {
+        this.clearSelection();
+        this.render();
+      });
+      this.typeSelect.addEventListener("change", () => {
+        this.clearSelection();
+        this.render();
+      });
+      this.requireElement(".abe-multi-select").addEventListener("click", () => this.toggleSelectionMode());
+      this.requireElement(".abe-blacklist-selected").addEventListener("click", () => void this.blacklistSelectedEntries());
+      this.requireElement(".abe-delete-selected").addEventListener("click", () => void this.deleteSelectedEntries());
       this.list.addEventListener("click", (event) => this.handleListClick(event));
+      this.list.addEventListener("change", (event) => this.handleSelectionChange(event));
       this.requireElement(".abe-export").addEventListener("click", () => this.exportIndex());
       this.requireElement(".abe-export-favorites").addEventListener("click", () => this.exportFavoritesJson());
       this.requireElement(".abe-export-csv").addEventListener("click", () => this.exportFavoritesCsv());
@@ -695,8 +981,67 @@
       });
       window.setInterval(() => this.updatePath(), 500);
     }
+    bindPanelResize() {
+      const handle = this.requireElement(".abe-resize-handle");
+      let startX = 0;
+      let startWidth = this.panelWidth;
+      let resizing = false;
+      const stop = () => {
+        if (!resizing) return;
+        resizing = false;
+        handle.classList.remove("abe-resizing");
+        try {
+          localStorage.setItem(PANEL_WIDTH_KEY, String(this.panelWidth));
+        } catch {
+        }
+      };
+      handle.addEventListener("pointerdown", (event) => {
+        if (event.button !== 0) return;
+        event.preventDefault();
+        resizing = true;
+        startX = event.clientX;
+        startWidth = this.panelWidth;
+        handle.classList.add("abe-resizing");
+        handle.setPointerCapture(event.pointerId);
+      });
+      handle.addEventListener("pointermove", (event) => {
+        if (!resizing) return;
+        this.setPanelWidth(startWidth + event.clientX - startX, false);
+      });
+      handle.addEventListener("pointerup", (event) => {
+        if (handle.hasPointerCapture(event.pointerId)) handle.releasePointerCapture(event.pointerId);
+        stop();
+      });
+      handle.addEventListener("pointercancel", stop);
+      handle.addEventListener("keydown", (event) => {
+        const step = event.shiftKey ? 80 : 20;
+        if (event.key === "ArrowRight") {
+          event.preventDefault();
+          this.setPanelWidth(this.panelWidth + step);
+        } else if (event.key === "ArrowLeft") {
+          event.preventDefault();
+          this.setPanelWidth(this.panelWidth - step);
+        } else return;
+        handle.focus();
+      });
+      window.addEventListener("resize", () => this.setPanelWidth(this.panelWidth, false));
+    }
+    setPanelWidth(width, persist = true) {
+      this.panelWidth = clampPanelWidth(width);
+      this.panel.style.setProperty("--abe-panel-width", `${this.panelWidth}px`);
+      const handle = this.root.querySelector(".abe-resize-handle");
+      handle?.setAttribute("aria-valuenow", String(this.panelWidth));
+      handle?.setAttribute("aria-valuemin", String(PANEL_WIDTH_MIN));
+      handle?.setAttribute("aria-valuemax", String(panelWidthMax()));
+      if (persist) {
+        try {
+          localStorage.setItem(PANEL_WIDTH_KEY, String(this.panelWidth));
+        } catch {
+        }
+      }
+    }
     async ensureDirectory(path, force) {
-      const normalized = normalizePath(path);
+      const normalized = normalizePath2(path);
       if (this.loadingDirectories.has(normalized)) return;
       const pagination = this.directoryPagination.get(normalized);
       if (!force && pagination?.complete) {
@@ -742,6 +1087,204 @@
         this.render();
       }
     }
+    async startAutoScan() {
+      if (this.autoScanState === "running" || this.autoScanState === "paused") return;
+      const rootPath = normalizePath2(this.autoScanRootInput.value.trim() || this.selectedDirectory || currentPath());
+      const intervalMs = readScanInterval(this.autoScanIntervalInput.value);
+      if (intervalMs === void 0) {
+        this.status.textContent = "\u81EA\u52A8\u626B\u63CF\u95F4\u9694\u5FC5\u987B\u662F 0.5 \u5230 3600 \u79D2";
+        return;
+      }
+      if (!window.confirm(`\u786E\u5B9A\u4ECE ${rootPath} \u5F00\u59CB\u81EA\u52A8\u9012\u5F52\u626B\u63CF\u5417\uFF1F\u626B\u63CF\u4F1A\u6309 ${formatSeconds(intervalMs)} \u79D2\u95F4\u9694\u8BF7\u6C42\u76EE\u5F55\u5E76\u5199\u5165\u7F13\u5B58\u3002`)) return;
+      this.autoScanRootPath = rootPath;
+      this.autoScanIntervalMs = intervalMs;
+      this.autoScanRootInput.value = rootPath;
+      this.autoScanCheckpoint = void 0;
+      this.autoScanState = "running";
+      this.autoScanFailureCount = 0;
+      void this.runAutoScan(rootPath, intervalMs);
+    }
+    pauseAutoScan() {
+      if (!this.autoScanController || this.autoScanState !== "running") return;
+      this.autoScanController.pause();
+      this.autoScanState = "paused";
+      this.status.textContent = "\u81EA\u52A8\u626B\u63CF\u5C06\u5728\u5F53\u524D\u76EE\u5F55\u5B8C\u6210\u540E\u6682\u505C";
+      this.updateAutoScanControls();
+    }
+    resumeAutoScan() {
+      if (this.autoScanController && this.autoScanState === "paused") {
+        this.autoScanState = "running";
+        this.autoScanController.resume();
+        this.status.textContent = "\u81EA\u52A8\u626B\u63CF\u7EE7\u7EED\u4E2D\u2026";
+        this.updateAutoScanControls();
+        return;
+      }
+      if (this.autoScanState === "running") return;
+      if (!this.autoScanCheckpoint) {
+        const recovered = this.createRecoveredCheckpoint();
+        if (!recovered) {
+          this.status.textContent = "\u6CA1\u6709\u53EF\u6062\u590D\u7684\u81EA\u52A8\u626B\u63CF\u961F\u5217";
+          this.updateAutoScanControls();
+          return;
+        }
+        this.autoScanCheckpoint = recovered;
+        this.autoScanRootPath = recovered.rootPath;
+      }
+      const intervalMs = readScanInterval(this.autoScanIntervalInput.value) ?? this.autoScanIntervalMs;
+      this.autoScanIntervalMs = intervalMs;
+      this.autoScanState = "running";
+      void this.runAutoScan(this.autoScanRootPath, intervalMs, this.autoScanCheckpoint);
+    }
+    stopAutoScan() {
+      if (!this.autoScanController || this.autoScanState !== "running" && this.autoScanState !== "paused") return;
+      this.autoScanState = "stopped";
+      this.autoScanController.stop();
+      this.status.textContent = "\u6B63\u5728\u505C\u6B62\u81EA\u52A8\u626B\u63CF\u5E76\u4FDD\u5B58\u65AD\u70B9\u2026";
+      this.updateAutoScanControls();
+    }
+    async runAutoScan(rootPath, intervalMs, resumeFrom) {
+      if (this.autoScanController) return;
+      const controller = new TreeScanController();
+      this.autoScanController = controller;
+      this.autoScanFailureCount = resumeFrom?.failures.length ?? 0;
+      this.autoScanProgress.textContent = resumeFrom ? "\u51C6\u5907\u4ECE\u65AD\u70B9\u7EE7\u7EED\u2026" : "\u51C6\u5907\u5F00\u59CB\u2026";
+      this.updateAutoScanControls();
+      try {
+        await this.persistState(rootPath);
+        const result = await controller.run(rootPath, {
+          maxDepth: 10,
+          maxNodes: 5e4,
+          maxDirectories: 2e3,
+          directoryDelayMs: intervalMs,
+          directoryJitterMs: Math.min(500, intervalMs),
+          directoryOptions: {
+            pageSize: 100,
+            maxPages: 200,
+            maxRetries: 3,
+            delayMs: intervalMs,
+            jitterMs: Math.min(500, intervalMs)
+          },
+          ...resumeFrom ? { resumeFrom } : {},
+          scanDirectory: async (path, options) => {
+            const result2 = await scanAListDirectory(path, options);
+            const normalized = normalizePath2(path);
+            const parentUrl = new URL(encodePath(normalized), location.origin).href;
+            const now = (/* @__PURE__ */ new Date()).toISOString();
+            const scanRootPath = normalizePath2(rootPath);
+            const previousChildren = directChildren(this.graph, parentUrl);
+            const scopedEntries = result2.entries.map((entry) => ({
+              ...entry,
+              metadata: {
+                ...entry.metadata,
+                depth: pathDepth(scanRootPath, normalized),
+                parentPath: normalized,
+                scanRootPath
+              }
+            }));
+            mergeEntries(this.graph, parentUrl, scopedEntries, now, true);
+            reconcileDirectoryChildren(this.graph, previousChildren, directChildren(this.graph, parentUrl), now);
+            this.entries = graphEntries(this.graph);
+            this.loadedDirectories.add(normalized);
+            this.directoryPagination.set(normalized, {
+              nextPage: result2.startPage + result2.pagesLoaded,
+              loaded: result2.entries.length,
+              total: result2.total,
+              complete: !result2.truncated
+            });
+            this.directoryLoadedAt.set(normalized, now);
+            this.directoryErrors.delete(normalized);
+            this.render();
+            return result2;
+          },
+          onProgress: (progress) => this.updateAutoScanProgress(progress),
+          onCheckpoint: async (checkpoint) => {
+            this.autoScanCheckpoint = checkpoint;
+            this.absorbAutoScanFailures(checkpoint.failures);
+            await this.persistState(rootPath);
+          }
+        });
+        this.autoScanCheckpoint = result.checkpoint;
+        this.absorbAutoScanFailures(result.failures);
+        this.autoScanState = result.stopped || result.checkpoint ? "stopped" : "completed";
+        await this.persistState(rootPath);
+        this.status.textContent = result.stopped ? `\u81EA\u52A8\u626B\u63CF\u5DF2\u505C\u6B62\uFF0C\u5DF2\u626B\u63CF ${result.directoriesScanned} \u4E2A\u76EE\u5F55` : result.checkpoint ? `\u81EA\u52A8\u626B\u63CF\u5DF2\u5230\u8FBE\u5B89\u5168\u4E0A\u9650\uFF0C\u53EF\u7EE7\u7EED\u5269\u4F59 ${result.checkpoint.frontier.length} \u4E2A\u76EE\u5F55` : `\u81EA\u52A8\u626B\u63CF\u5B8C\u6210\uFF0C\u5DF2\u626B\u63CF ${result.directoriesScanned} \u4E2A\u76EE\u5F55`;
+      } catch (error) {
+        this.autoScanState = "stopped";
+        this.status.textContent = error instanceof Error ? `\u81EA\u52A8\u626B\u63CF\u5931\u8D25\uFF1A${error.message}` : "\u81EA\u52A8\u626B\u63CF\u5931\u8D25";
+        await this.persistState(rootPath);
+      } finally {
+        if (this.autoScanController === controller) this.autoScanController = void 0;
+        this.updateAutoScanControls();
+        this.render();
+      }
+    }
+    absorbAutoScanFailures(failures) {
+      if (this.autoScanFailureCount > failures.length) this.autoScanFailureCount = 0;
+      this.failures.push(...failures.slice(this.autoScanFailureCount));
+      this.autoScanFailureCount = failures.length;
+    }
+    updateAutoScanProgress(progress) {
+      const state = progress.state === "paused" ? "\u5DF2\u6682\u505C" : progress.state === "stopped" ? "\u5DF2\u505C\u6B62" : progress.state === "completed" ? "\u5DF2\u5B8C\u6210" : "\u626B\u63CF\u4E2D";
+      this.autoScanProgress.textContent = `${state} \xB7 \u5F53\u524D ${progress.currentPath || "-"} \xB7 \u76EE\u5F55 ${progress.directoriesScanned} \xB7 \u961F\u5217 ${progress.directoriesQueued} \xB7 \u6761\u76EE ${progress.entriesDiscovered}`;
+      if (progress.state === "running") this.status.textContent = `\u81EA\u52A8\u626B\u63CF\u4E2D\uFF1A${progress.currentPath || "\u51C6\u5907\u4E0B\u4E00\u76EE\u5F55"}`;
+      else if (progress.state === "paused") {
+        this.autoScanState = "paused";
+        this.status.textContent = `\u81EA\u52A8\u626B\u63CF\u5DF2\u6682\u505C\uFF0C\u70B9\u51FB\u201C\u7EE7\u7EED\u201D\u91CD\u8BD5\uFF1A${progress.currentPath || "\u5F53\u524D\u76EE\u5F55"}`;
+        this.updateAutoScanControls();
+      }
+    }
+    updateAutoScanControls() {
+      const active = this.autoScanState === "running" || this.autoScanState === "paused";
+      const running = this.autoScanState === "running";
+      const start = this.requireElement(".abe-scan-start");
+      const pause = this.requireElement(".abe-scan-pause");
+      const resume = this.requireElement(".abe-scan-resume");
+      const stop = this.requireElement(".abe-scan-stop");
+      start.disabled = active;
+      pause.disabled = !running;
+      const canRecover = !this.autoScanController && !this.autoScanCheckpoint && this.hasRecoverableScan();
+      resume.disabled = running || !this.autoScanCheckpoint && !canRecover && !this.autoScanController;
+      resume.textContent = this.autoScanCheckpoint ? "\u7EE7\u7EED" : "\u6062\u590D\u626B\u63CF";
+      stop.disabled = !active;
+    }
+    hasRecoverableScan() {
+      const rootPath = normalizePath2(this.autoScanRootPath);
+      const loadedPaths = [...this.loadedDirectories].map(normalizePath2).filter((path) => isPathWithin(rootPath, path));
+      if (loadedPaths.some((path) => this.directoryPagination.get(path)?.complete === false)) return true;
+      const loaded = new Set(loadedPaths);
+      const hasUnloadedChild = loadedPaths.some((parentPath) => childrenOf(this.graph, urlForPath(parentPath)).some((node) => {
+        const childPath = pathFromUrl2(node.url);
+        return node.type === "directory" && !loaded.has(childPath) && scanDepth(rootPath, childPath) < 10;
+      }));
+      const hasScopedNodes = [...this.graph.nodes.values()].some((node) => node.url !== urlForPath(rootPath) && isPathWithin(rootPath, pathFromUrl2(node.url)));
+      return hasUnloadedChild || !loaded.has(rootPath) && hasScopedNodes;
+    }
+    // Rebuild only the missing BFS frontier; cached entries remain in the graph.
+    createRecoveredCheckpoint() {
+      const rootPath = normalizePath2(this.autoScanRootPath);
+      const rootUrl = urlForPath(rootPath);
+      const loadedPaths = new Set([...this.loadedDirectories].map(normalizePath2).filter((path) => isPathWithin(rootPath, path)));
+      const incompletePaths = new Set([...loadedPaths].filter((path) => this.directoryPagination.get(path)?.complete === false));
+      const visitedDirectories = new Set([...loadedPaths].filter((path) => !incompletePaths.has(path)));
+      const frontier = [...this.graph.nodes.values()].filter((node) => node.type === "directory").map((node) => ({ path: pathFromUrl2(node.url), depth: scanDepth(rootPath, pathFromUrl2(node.url)) })).filter((entry) => entry.depth < 10 && isPathWithin(rootPath, entry.path) && !visitedDirectories.has(entry.path)).filter((entry, index, all) => all.findIndex((candidate) => candidate.path === entry.path) === index).sort((left, right) => left.depth - right.depth);
+      const hasScopedNodes = [...this.graph.nodes.values()].some((node) => node.url !== rootUrl && isPathWithin(rootPath, pathFromUrl2(node.url)));
+      if (!loadedPaths.has(rootPath) && hasScopedNodes && !frontier.some((entry) => entry.path === rootPath)) frontier.unshift({ path: rootPath, depth: 0 });
+      if (frontier.length === 0) return void 0;
+      const entries = [...this.graph.nodes.values()].filter((node) => node.url !== rootUrl && isPathWithin(rootPath, pathFromUrl2(node.url))).map(nodeToEntry);
+      const failures = this.failures.filter((failure) => isPathWithin(rootPath, failure.path));
+      return {
+        rootPath,
+        maxDepth: 10,
+        maxNodes: 5e4,
+        maxDirectories: 2e3,
+        frontier,
+        visitedDirectories: [...visitedDirectories],
+        entries,
+        failures,
+        directoriesScanned: visitedDirectories.size,
+        updatedAt: (/* @__PURE__ */ new Date()).toISOString()
+      };
+    }
     handleListClick(event) {
       const target = event.target;
       if (!(target instanceof Element)) return;
@@ -749,6 +1292,21 @@
       const path = target.closest("[data-path]")?.dataset.path;
       if (action === "expand" && path) {
         this.toggleDirectory(path);
+        return;
+      }
+      if (action === "select-root" && path) {
+        const normalized = normalizePath2(path);
+        this.autoScanRootPath = normalized;
+        this.autoScanRootInput.value = normalized;
+        const autoScan = this.requireElement(".abe-auto-scan");
+        autoScan.open = true;
+        this.status.textContent = `\u5DF2\u9009\u62E9\u626B\u63CF\u6839\u76EE\u5F55\uFF1A${normalized}`;
+        return;
+      }
+      if (action === "refresh" && path) {
+        const button2 = target.closest('[data-action="refresh"]');
+        if (button2) button2.disabled = true;
+        void this.ensureDirectory(path, true);
         return;
       }
       if (action === "load-more" && path) {
@@ -790,8 +1348,40 @@
       void this.persistState(currentPath());
       this.render();
     }
+    handleSelectionChange(event) {
+      const target = event.target;
+      if (!(target instanceof HTMLInputElement) || !target.matches("[data-select]")) return;
+      const url = target.dataset.select;
+      if (!url || target.disabled) return;
+      if (target.checked) this.selectedUrls.add(url);
+      else this.selectedUrls.delete(url);
+      this.updateSelectionControls();
+    }
+    toggleSelectionMode() {
+      this.selectionMode = !this.selectionMode;
+      if (!this.selectionMode) this.clearSelection();
+      this.render();
+    }
+    clearSelection() {
+      this.selectedUrls.clear();
+    }
+    updateSelectionControls() {
+      for (const url of this.selectedUrls) if (!this.entries.some((entry) => entry.url === url) || this.blacklisted.has(url)) this.selectedUrls.delete(url);
+      const selectedCount = this.selectedUrls.size;
+      const multiSelect = this.requireElement(".abe-multi-select");
+      const blacklistSelected = this.requireElement(".abe-blacklist-selected");
+      const deleteSelected = this.requireElement(".abe-delete-selected");
+      multiSelect.textContent = this.selectionMode ? "\u9000\u51FA\u591A\u9009" : "\u591A\u9009";
+      multiSelect.setAttribute("aria-pressed", String(this.selectionMode));
+      blacklistSelected.classList.toggle("abe-hidden", !this.selectionMode);
+      blacklistSelected.disabled = this.bulkBlacklistPending || selectedCount === 0;
+      blacklistSelected.textContent = selectedCount ? `\u62C9\u9ED1\u9009\u4E2D (${selectedCount})` : "\u62C9\u9ED1\u9009\u4E2D";
+      deleteSelected.classList.toggle("abe-hidden", !this.selectionMode);
+      deleteSelected.disabled = this.bulkDeletePending || selectedCount === 0;
+      deleteSelected.textContent = selectedCount ? `\u5220\u9664\u7F13\u5B58 (${selectedCount})` : "\u5220\u9664\u7F13\u5B58";
+    }
     toggleDirectory(path) {
-      const normalized = normalizePath(path);
+      const normalized = normalizePath2(path);
       if (this.expandedDirectories.has(normalized)) {
         this.expandedDirectories.delete(normalized);
       } else {
@@ -806,6 +1396,7 @@
       this.render();
     }
     render() {
+      this.updateSelectionControls();
       const query = this.searchInput.value.trim().toLocaleLowerCase();
       const type = this.typeSelect.value;
       const scopedEntries = query || type === "favorite" || type === "seen" || type === "unseen" || type === "blacklisted" ? this.entries : childrenOf(this.graph, new URL(encodePath(this.selectedDirectory), location.origin).href).map(nodeToEntry);
@@ -828,7 +1419,7 @@
           if (ancestors.has(node.url)) continue;
           if (this.blacklisted.has(node.url)) continue;
           const entry = nodeToEntry(node);
-          const path = pathFromUrl(entry.url);
+          const path = pathFromUrl2(entry.url);
           const expanded = entry.type === "directory" && this.expandedDirectories.has(path);
           rows.push({ kind: "entry", entry, depth, expanded });
           if (entry.type !== "directory" || !expanded) continue;
@@ -875,6 +1466,7 @@
       root.textContent = "/";
       root.addEventListener("click", () => {
         this.selectedDirectory = "/";
+        this.autoScanRootInput.value = "/";
         void this.ensureDirectory("/", false);
       });
       container.append(root);
@@ -889,6 +1481,7 @@
         const target = path;
         button.addEventListener("click", () => {
           this.selectedDirectory = target;
+          this.autoScanRootInput.value = target;
           void this.ensureDirectory(target, false);
         });
         container.append(separator, button);
@@ -926,11 +1519,22 @@
       const element = document.createElement("div");
       element.className = "abe-row";
       element.style.paddingLeft = `${14 + row.depth * 22}px`;
+      if (this.selectionMode) {
+        element.classList.add("abe-selecting");
+        const checkbox = document.createElement("input");
+        checkbox.type = "checkbox";
+        checkbox.className = "abe-select-checkbox";
+        checkbox.dataset.select = entry.url;
+        checkbox.checked = this.selectedUrls.has(entry.url);
+        checkbox.disabled = this.blacklisted.has(entry.url) || this.bulkBlacklistPending;
+        checkbox.setAttribute("aria-label", `\u9009\u62E9 ${entry.title}`);
+        element.append(checkbox);
+      }
       const kind = document.createElement("button");
       kind.type = "button";
       kind.className = "abe-kind";
       kind.dataset.action = entry.type === "directory" ? "expand" : "noop";
-      kind.dataset.path = entry.type === "directory" ? pathFromUrl(entry.url) : "";
+      kind.dataset.path = entry.type === "directory" ? pathFromUrl2(entry.url) : "";
       kind.textContent = entry.type === "directory" ? row.expanded ? "\u25BE" : "\u25B8" : "\u266A";
       kind.title = entry.type === "directory" ? row.expanded ? "\u6536\u8D77\u76EE\u5F55" : "\u5C55\u5F00\u76EE\u5F55" : "\u6587\u4EF6";
       const link = document.createElement("a");
@@ -945,14 +1549,14 @@
       name.textContent = entry.title;
       const meta = document.createElement("span");
       meta.className = "abe-meta";
-      meta.textContent = entry.type === "directory" ? this.loadedDirectories.has(pathFromUrl(entry.url)) ? `\u76EE\u5F55 \xB7 \u5DF2\u52A0\u8F7D${this.directoryLoadedAt.get(pathFromUrl(entry.url)) ? ` \xB7 ${formatTime(this.directoryLoadedAt.get(pathFromUrl(entry.url)))}` : ""}` : "\u76EE\u5F55 \xB7 \u70B9\u51FB\u5C55\u5F00" : formatSize(Number(entry.metadata?.size)) || "\u6587\u4EF6";
+      meta.textContent = entry.type === "directory" ? this.loadedDirectories.has(pathFromUrl2(entry.url)) ? `\u76EE\u5F55 \xB7 \u5DF2\u52A0\u8F7D${this.directoryLoadedAt.get(pathFromUrl2(entry.url)) ? ` \xB7 ${formatTime(this.directoryLoadedAt.get(pathFromUrl2(entry.url)))}` : ""}` : "\u76EE\u5F55 \xB7 \u70B9\u51FB\u5C55\u5F00" : formatSize(Number(entry.metadata?.size)) || "\u6587\u4EF6";
       if (entry.metadata?.status === "missing") meta.textContent += " \xB7 \u5DF2\u5931\u6548";
       if (this.seenUrls.has(entry.url)) meta.textContent += " \xB7 \u5DF2\u770B";
       link.append(name, meta);
       link.addEventListener("click", (event) => {
         if (entry.type === "directory" && event.button === 0 && !event.ctrlKey && !event.metaKey && !event.shiftKey && !event.altKey) {
           event.preventDefault();
-          this.toggleDirectory(pathFromUrl(entry.url));
+          this.toggleDirectory(pathFromUrl2(entry.url));
           return;
         }
         if (entry.type === "content") {
@@ -983,19 +1587,40 @@
       blacklist.title = blacklisted ? "\u79FB\u51FA\u9ED1\u540D\u5355" : "\u52A0\u5165\u9ED1\u540D\u5355";
       blacklist.setAttribute("aria-label", blacklist.title);
       blacklist.textContent = blacklisted ? "\u21A9" : "\u2298";
+      blacklist.disabled = this.bulkBlacklistPending || this.blacklistPending.has(entry.url);
+      const refresh = document.createElement("button");
+      refresh.type = "button";
+      refresh.className = "abe-refresh-directory";
+      refresh.dataset.action = "refresh";
+      refresh.dataset.path = entry.type === "directory" ? pathFromUrl2(entry.url) : "";
+      refresh.title = "\u5237\u65B0\u76EE\u5F55";
+      refresh.setAttribute("aria-label", "\u5237\u65B0\u76EE\u5F55");
+      refresh.textContent = "\u21BB";
+      refresh.disabled = entry.type !== "directory" || this.loadingDirectories.has(pathFromUrl2(entry.url));
+      const selectRoot = document.createElement("button");
+      selectRoot.type = "button";
+      selectRoot.className = "abe-select-root";
+      selectRoot.dataset.action = "select-root";
+      selectRoot.dataset.path = entry.type === "directory" ? pathFromUrl2(entry.url) : "";
+      selectRoot.title = "\u8BBE\u4E3A\u81EA\u52A8\u626B\u63CF\u6839\u76EE\u5F55";
+      selectRoot.setAttribute("aria-label", "\u8BBE\u4E3A\u81EA\u52A8\u626B\u63CF\u6839\u76EE\u5F55");
+      selectRoot.textContent = "\u2302";
+      selectRoot.disabled = entry.type !== "directory";
       const reclassify = document.createElement("button");
       reclassify.type = "button";
       reclassify.className = "abe-reclassify";
       reclassify.dataset.url = entry.url;
       reclassify.title = "\u5207\u6362\u76EE\u5F55/\u6587\u4EF6\u5206\u7C7B";
       reclassify.textContent = "\u2194";
-      actions.append(favorite, blacklist, reclassify);
+      actions.append(favorite, blacklist, ...entry.type === "directory" ? [refresh, selectRoot] : [], reclassify);
       element.append(kind, link, actions);
       return element;
     }
     async toggleBlacklist(entry) {
+      if (this.bulkBlacklistPending) return;
       if (this.blacklistPending.has(entry.url)) return;
       this.blacklistPending.add(entry.url);
+      this.selectedUrls.delete(entry.url);
       const active = this.blacklisted.has(entry.url);
       try {
         if (active) this.blacklisted.delete(entry.url);
@@ -1009,6 +1634,106 @@
         this.blacklistPending.delete(entry.url);
         this.render();
       }
+    }
+    async blacklistSelectedEntries() {
+      if (this.bulkBlacklistPending) return;
+      const urls = [...this.selectedUrls].filter((url) => this.entries.some((entry) => entry.url === url) && !this.blacklisted.has(url));
+      if (!urls.length || !window.confirm(`\u786E\u5B9A\u5C06\u9009\u4E2D\u7684 ${urls.length} \u9879\u52A0\u5165\u9ED1\u540D\u5355\u5417\uFF1F`)) return;
+      const previous = this.blacklisted;
+      const previousSelection = new Set(this.selectedUrls);
+      this.bulkBlacklistPending = true;
+      this.blacklisted = /* @__PURE__ */ new Set([...previous, ...urls]);
+      this.updateSelectionControls();
+      this.render();
+      try {
+        await this.persistState(this.selectedDirectory);
+        this.selectedUrls.clear();
+        this.status.textContent = `\u5DF2\u62C9\u9ED1 ${urls.length} \u9879`;
+      } catch (error) {
+        this.blacklisted = previous;
+        this.selectedUrls = previousSelection;
+        this.status.textContent = error instanceof Error ? `\u9ED1\u540D\u5355\u4FDD\u5B58\u5931\u8D25\uFF1A${error.message}` : "\u9ED1\u540D\u5355\u4FDD\u5B58\u5931\u8D25";
+      } finally {
+        this.bulkBlacklistPending = false;
+        this.render();
+      }
+    }
+    async deleteSelectedEntries() {
+      if (this.bulkDeletePending) return;
+      if (this.autoScanController || this.autoScanState === "running" || this.autoScanState === "paused") {
+        this.status.textContent = "\u8BF7\u5148\u6682\u505C\u6216\u505C\u6B62\u81EA\u52A8\u626B\u63CF\uFF0C\u518D\u5220\u9664\u7F13\u5B58";
+        return;
+      }
+      const urls = [...this.selectedUrls].filter((url) => this.entries.some((entry) => entry.url === url));
+      if (!urls.length || !window.confirm(`\u786E\u5B9A\u5220\u9664\u9009\u4E2D\u7684 ${urls.length} \u9879\u7F13\u5B58\u5417\uFF1F\u76EE\u5F55\u4F1A\u8FDE\u540C\u5DF2\u7F13\u5B58\u7684\u5B50\u9879\u4E00\u8D77\u5220\u9664\uFF0C\u4E0D\u4F1A\u5220\u9664\u8FDC\u7AEF\u6587\u4EF6\u3002`)) return;
+      const previous = {
+        graph: serializeGraph(this.graph),
+        entries: this.entries,
+        loadedDirectories: new Set(this.loadedDirectories),
+        directoryPagination: new Map(this.directoryPagination),
+        directoryLoadedAt: new Map(this.directoryLoadedAt),
+        directoryErrors: new Map(this.directoryErrors),
+        expandedDirectories: new Set(this.expandedDirectories),
+        favorites: new Set(this.favorites),
+        blacklisted: new Set(this.blacklisted),
+        seenUrls: new Set(this.seenUrls),
+        selectedUrls: new Set(this.selectedUrls),
+        autoScanCheckpoint: this.autoScanCheckpoint,
+        autoScanState: this.autoScanState
+      };
+      this.bulkDeletePending = true;
+      const removed = removeNodes(this.graph, new Set(urls));
+      const removedUrls = new Set(removed);
+      this.entries = graphEntries(this.graph);
+      for (const path of [...this.loadedDirectories]) if (removedUrls.has(urlForPath(path))) this.loadedDirectories.delete(path);
+      for (const path of [...this.directoryPagination.keys()]) if (removedUrls.has(urlForPath(path))) this.directoryPagination.delete(path);
+      for (const path of [...this.directoryLoadedAt.keys()]) if (removedUrls.has(urlForPath(path))) this.directoryLoadedAt.delete(path);
+      for (const path of [...this.directoryErrors.keys()]) if (removedUrls.has(urlForPath(path))) this.directoryErrors.delete(path);
+      this.expandedDirectories = new Set([...this.expandedDirectories].filter((path) => !removedUrls.has(urlForPath(path))));
+      this.favorites = new Set([...this.favorites].filter((url) => !removedUrls.has(url)));
+      this.blacklisted = new Set([...this.blacklisted].filter((url) => !removedUrls.has(url)));
+      this.seenUrls = new Set([...this.seenUrls].filter((url) => !removedUrls.has(url)));
+      this.selectedUrls.clear();
+      this.autoScanCheckpoint = this.pruneAutoScanCheckpoint(removedUrls);
+      this.autoScanState = this.autoScanCheckpoint ? "stopped" : "idle";
+      this.updateCachedProgress();
+      this.render();
+      try {
+        await this.persistState(this.selectedDirectory);
+        this.status.textContent = `\u5DF2\u5220\u9664 ${removed.size} \u9879\u7F13\u5B58`;
+      } catch (error) {
+        this.graph = hydrateGraph(previous.graph);
+        this.entries = previous.entries;
+        this.loadedDirectories = previous.loadedDirectories;
+        this.directoryPagination = previous.directoryPagination;
+        this.directoryLoadedAt = previous.directoryLoadedAt;
+        this.directoryErrors = previous.directoryErrors;
+        this.expandedDirectories = previous.expandedDirectories;
+        this.favorites = previous.favorites;
+        this.blacklisted = previous.blacklisted;
+        this.seenUrls = previous.seenUrls;
+        this.selectedUrls = previous.selectedUrls;
+        this.autoScanCheckpoint = previous.autoScanCheckpoint;
+        this.autoScanState = previous.autoScanState;
+        this.updateCachedProgress();
+        this.status.textContent = error instanceof Error ? `\u7F13\u5B58\u5220\u9664\u4FDD\u5B58\u5931\u8D25\uFF1A${error.message}` : "\u7F13\u5B58\u5220\u9664\u4FDD\u5B58\u5931\u8D25";
+      } finally {
+        this.bulkDeletePending = false;
+        this.render();
+      }
+    }
+    pruneAutoScanCheckpoint(removedUrls) {
+      if (!this.autoScanCheckpoint) return void 0;
+      const checkpoint = this.autoScanCheckpoint;
+      return {
+        ...checkpoint,
+        frontier: checkpoint.frontier.filter((entry) => !removedUrls.has(urlForPath(entry.path))),
+        visitedDirectories: checkpoint.visitedDirectories.filter((path) => !removedUrls.has(urlForPath(path))),
+        entries: checkpoint.entries.filter((entry) => !removedUrls.has(entry.url)),
+        failures: checkpoint.failures.filter((failure) => !removedUrls.has(urlForPath(failure.path))),
+        directoriesScanned: checkpoint.visitedDirectories.filter((path) => !removedUrls.has(urlForPath(path))).length,
+        updatedAt: (/* @__PURE__ */ new Date()).toISOString()
+      };
     }
     async playAudio(url, title) {
       const requestId = ++this.audioRequestId;
@@ -1032,6 +1757,13 @@
         this.status.textContent = error instanceof Error ? `\u64AD\u653E\u5730\u5740\u83B7\u53D6\u5931\u8D25\uFF1A${error.message}` : "\u64AD\u653E\u5730\u5740\u83B7\u53D6\u5931\u8D25";
       }
     }
+    updateCachedProgress() {
+      const rootUrl = new URL(encodePath("/"), location.origin).href;
+      const directories = [...this.graph.nodes.values()].filter((node) => node.type === "directory" && node.url !== rootUrl).length;
+      const entries = [...this.graph.nodes.values()].filter((node) => node.url !== rootUrl).length;
+      const queued = this.autoScanCheckpoint?.frontier.length ?? 0;
+      this.autoScanProgress.textContent = `\u5DF2\u7F13\u5B58 \xB7 \u76EE\u5F55 ${directories} \xB7 \u961F\u5217 ${queued} \xB7 \u6761\u76EE ${entries}`;
+    }
     closePlayer() {
       this.audioRequestId += 1;
       this.audio.pause();
@@ -1054,9 +1786,18 @@
           this.seenUrls = new Set(state.seenUrls ?? []);
           this.directoryErrors = new Map(Object.entries(state.directoryErrors ?? {}));
           this.expandedDirectories = new Set(state.expandedDirectories ?? []);
-          this.status.textContent = `\u5DF2\u6062\u590D ${this.entries.length} \u9879\uFF0C\u6309\u9700\u5C55\u5F00\u76EE\u5F55`;
-        } else this.favorites = readLegacyFavorites();
+          this.autoScanCheckpoint = state.checkpoint;
+          this.autoScanRootPath = state.autoScan?.rootPath ?? state.checkpoint?.rootPath ?? currentPath();
+          this.autoScanIntervalMs = state.autoScan?.intervalMs ?? AUTO_SCAN_DEFAULT_INTERVAL_MS;
+          this.autoScanRootInput.value = this.autoScanRootPath;
+          this.autoScanIntervalInput.value = String(this.autoScanIntervalMs / 1e3);
+          this.autoScanState = state.checkpoint ? "stopped" : "idle";
+          this.status.textContent = state.checkpoint ? `\u5DF2\u6062\u590D ${this.entries.length} \u9879\uFF1B\u81EA\u52A8\u626B\u63CF\u6709\u672A\u5B8C\u6210\u65AD\u70B9` : `\u5DF2\u6062\u590D ${this.entries.length} \u9879\uFF0C\u6309\u9700\u5C55\u5F00\u76EE\u5F55`;
+        } else {
+          this.favorites = readLegacyFavorites();
+        }
         this.render();
+        this.updateAutoScanControls();
         await this.requestPersistentStorage();
       } catch (error) {
         this.status.textContent = error instanceof Error ? `\u6062\u590D\u5931\u8D25\uFF1A${error.message}` : "\u6062\u590D\u5931\u8D25";
@@ -1071,7 +1812,25 @@
       }
     }
     async persistState(rootPath) {
-      await saveIndexState({ id: location.origin, rootPath, updatedAt: (/* @__PURE__ */ new Date()).toISOString(), entries: this.entries, favorites: [...this.favorites], blacklisted: [...this.blacklisted], failures: this.failures, loadedDirectories: [...this.loadedDirectories], directoryPagination: Object.fromEntries(this.directoryPagination), directoryLoadedAt: Object.fromEntries(this.directoryLoadedAt), seenUrls: [...this.seenUrls], directoryErrors: Object.fromEntries(this.directoryErrors), expandedDirectories: [...this.expandedDirectories], graph: serializeGraph(this.graph) });
+      const state = {
+        id: location.origin,
+        rootPath,
+        updatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+        entries: this.entries,
+        favorites: [...this.favorites],
+        blacklisted: [...this.blacklisted],
+        failures: this.failures,
+        loadedDirectories: [...this.loadedDirectories],
+        directoryPagination: Object.fromEntries(this.directoryPagination),
+        directoryLoadedAt: Object.fromEntries(this.directoryLoadedAt),
+        seenUrls: [...this.seenUrls],
+        directoryErrors: Object.fromEntries(this.directoryErrors),
+        expandedDirectories: [...this.expandedDirectories],
+        graph: serializeGraph(this.graph),
+        autoScan: { rootPath: this.autoScanRootPath, intervalMs: this.autoScanIntervalMs },
+        ...this.autoScanCheckpoint ? { checkpoint: this.autoScanCheckpoint } : {}
+      };
+      await saveIndexState(state);
     }
     exportIndex() {
       downloadJson(createIndexExport({ sourceOrigin: location.origin, rootPath: currentPath(), entries: this.entries, favorites: this.favorites, blacklisted: this.blacklisted, graph: serializeGraph(this.graph), desktopState: { seenUrls: [...this.seenUrls], loadedDirectories: [...this.loadedDirectories], directoryPagination: Object.fromEntries(this.directoryPagination), directoryLoadedAt: Object.fromEntries(this.directoryLoadedAt), expandedDirectories: [...this.expandedDirectories] } }), `asmrgay-index-${(/* @__PURE__ */ new Date()).toISOString().slice(0, 10)}.json`);
@@ -1088,6 +1847,10 @@
       this.status.textContent = `\u5DF2\u5BFC\u51FA ${this.favorites.size} \u4E2A\u6536\u85CF`;
     }
     async importIndex(event) {
+      if (this.autoScanState === "running" || this.autoScanState === "paused") {
+        this.status.textContent = "\u8BF7\u5148\u6682\u505C\u6216\u505C\u6B62\u81EA\u52A8\u626B\u63CF\uFF0C\u518D\u5BFC\u5165\u7D22\u5F15";
+        return;
+      }
       const input = event.target;
       if (!(input instanceof HTMLInputElement)) return;
       const file = input.files?.[0];
@@ -1123,6 +1886,8 @@
           this.directoryLoadedAt = new Map(Object.entries(imported.desktopState.directoryLoadedAt));
           this.expandedDirectories = new Set(imported.desktopState.expandedDirectories ?? []);
         }
+        this.autoScanCheckpoint = void 0;
+        this.autoScanState = "idle";
         await this.persistState(imported.rootPath);
         this.status.textContent = `${mode === "replace" ? "\u66FF\u6362" : "\u5408\u5E76"}\u5BFC\u5165\u5B8C\u6210\uFF1A\u5F53\u524D\u5171 ${this.entries.length} \u9879`;
         this.render();
@@ -1138,6 +1903,10 @@
       downloadJson({ schemaVersion: 1, exportedAt: (/* @__PURE__ */ new Date()).toISOString(), sourceOrigin: location.origin, scannerMode: "alist-api", failures: this.failures }, `asmrgay-failures-${(/* @__PURE__ */ new Date()).toISOString().slice(0, 10)}.json`);
     }
     async clearIndex() {
+      if (this.autoScanState === "running" || this.autoScanState === "paused") {
+        this.status.textContent = "\u8BF7\u5148\u505C\u6B62\u81EA\u52A8\u626B\u63CF\uFF0C\u518D\u6E05\u7A7A\u7D22\u5F15";
+        return;
+      }
       if (!window.confirm("\u786E\u5B9A\u6E05\u7A7A\u5DF2\u52A0\u8F7D\u7D22\u5F15\u3001\u6536\u85CF\u548C\u9ED1\u540D\u5355\u5417\uFF1F\u5EFA\u8BAE\u5148\u5BFC\u51FA\u5907\u4EFD\u3002")) return;
       this.entries = [];
       this.graph = createGraph();
@@ -1150,9 +1919,12 @@
       this.directoryErrors.clear();
       this.expandedDirectories.clear();
       this.failures = [];
+      this.autoScanCheckpoint = void 0;
+      this.autoScanState = "idle";
       await deleteIndexState(location.origin);
       this.status.textContent = "\u7D22\u5F15\u3001\u6536\u85CF\u548C\u9ED1\u540D\u5355\u5DF2\u6E05\u7A7A";
       this.render();
+      this.updateAutoScanControls();
     }
     setRefreshDisabled(disabled) {
       this.requireElement(".abe-refresh").disabled = disabled;
@@ -1166,7 +1938,7 @@
       return element;
     }
   };
-  function normalizePath(path) {
+  function normalizePath2(path) {
     try {
       const decoded = decodeURIComponent(path);
       return decoded.startsWith("/") ? decoded : `/${decoded}`;
@@ -1174,14 +1946,17 @@
       return path.startsWith("/") ? path : `/${path}`;
     }
   }
-  function pathFromUrl(url) {
-    return normalizePath(new URL(url).pathname);
+  function pathFromUrl2(url) {
+    return normalizePath2(new URL(url).pathname);
+  }
+  function urlForPath(path) {
+    return new URL(encodePath(normalizePath2(path)), location.origin).href;
   }
   function encodePath(path) {
     return path.split("/").map((segment) => encodeURIComponent(segment)).join("/");
   }
   function currentPath() {
-    return normalizePath(location.pathname);
+    return normalizePath2(location.pathname);
   }
   function safeDecode(value) {
     try {
@@ -1189,6 +1964,43 @@
     } catch {
       return value;
     }
+  }
+  function readPanelWidth() {
+    try {
+      const raw = localStorage.getItem(PANEL_WIDTH_KEY);
+      if (!raw) return PANEL_WIDTH_DEFAULT;
+      const value = Number(raw);
+      return Number.isFinite(value) ? clampPanelWidth(value) : PANEL_WIDTH_DEFAULT;
+    } catch {
+      return PANEL_WIDTH_DEFAULT;
+    }
+  }
+  function clampPanelWidth(width) {
+    return Math.round(Math.min(panelWidthMax(), Math.max(PANEL_WIDTH_MIN, width)));
+  }
+  function panelWidthMax() {
+    return typeof window === "undefined" ? PANEL_WIDTH_MAX : Math.max(PANEL_WIDTH_MIN, Math.min(PANEL_WIDTH_MAX, window.innerWidth - 24));
+  }
+  function readScanInterval(value) {
+    const milliseconds = Number(value) * 1e3;
+    if (!Number.isFinite(milliseconds) || milliseconds < AUTO_SCAN_MIN_INTERVAL_MS || milliseconds > 36e5) return void 0;
+    return Math.round(milliseconds);
+  }
+  function formatSeconds(milliseconds) {
+    return String(milliseconds / 1e3);
+  }
+  function pathDepth(rootPath, path) {
+    const rootSegments = normalizePath2(rootPath).split("/").filter(Boolean);
+    const segments = normalizePath2(path).split("/").filter(Boolean);
+    return Math.max(1, segments.length - rootSegments.length + 1);
+  }
+  function scanDepth(rootPath, path) {
+    return Math.max(0, pathDepth(rootPath, path) - 1);
+  }
+  function isPathWithin(rootPath, path) {
+    const root = normalizePath2(rootPath);
+    const candidate = normalizePath2(path);
+    return root === "/" ? candidate.startsWith("/") : candidate === root || candidate.startsWith(`${root}/`);
   }
   function mergeGraphs(left, right) {
     for (const [id, node] of right.nodes) left.nodes.set(id, node);

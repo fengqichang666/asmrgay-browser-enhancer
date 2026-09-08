@@ -29,6 +29,8 @@ class IndexViewer {
   private readonly search = requireElement<HTMLInputElement>("#search");
   private readonly filter = requireElement<HTMLSelectElement>("#filter");
   private readonly file = requireElement<HTMLInputElement>("#file");
+  private readonly multiSelect = requireElement<HTMLButtonElement>("#multi-select");
+  private readonly blacklistSelected = requireElement<HTMLButtonElement>("#blacklist-selected");
   private readonly mode = requireElement<HTMLSelectElement>("#mode");
   private readonly player = requireElement<HTMLElement>("#player");
   private readonly audio = requireElement<HTMLAudioElement>("#audio");
@@ -45,13 +47,19 @@ class IndexViewer {
   private playbackMode: PlaybackMode = "single";
   private queueIsFavorites = false;
   private loadRequestId = 0;
+  private selectionMode = false;
+  private selectedUrls = new Set<string>();
+  private bulkBlacklistPending = false;
 
   constructor() {
     requireElement("#import").addEventListener("click", () => this.file.click());
     this.file.addEventListener("change", (event) => void this.importFile(event));
-    this.search.addEventListener("input", () => this.render());
-    this.filter.addEventListener("change", () => this.render());
+    this.search.addEventListener("input", () => { this.clearSelection(); this.render(); });
+    this.filter.addEventListener("change", () => { this.clearSelection(); this.render(); });
+    this.multiSelect.addEventListener("click", () => this.toggleSelectionMode());
+    this.blacklistSelected.addEventListener("click", () => void this.blacklistSelectedEntries());
     this.tree.addEventListener("click", (event) => this.handleTreeClick(event));
+    this.tree.addEventListener("change", (event) => this.handleSelectionChange(event));
     requireElement("#play-favorites").addEventListener("click", () => this.playFavorites());
     requireElement("#player-close").addEventListener("click", () => this.closePlayer());
     requireElement("#player-prev").addEventListener("click", () => this.playRelative(-1));
@@ -126,7 +134,35 @@ class IndexViewer {
     this.render();
   }
 
+  private handleSelectionChange(event: Event): void {
+    const target = event.target;
+    if (!(target instanceof HTMLInputElement) || !target.matches("[data-select]")) return;
+    const url = target.dataset.select;
+    if (!url || target.disabled) return;
+    if (target.checked) this.selectedUrls.add(url); else this.selectedUrls.delete(url);
+    this.updateSelectionControls();
+  }
+
+  private toggleSelectionMode(): void {
+    this.selectionMode = !this.selectionMode;
+    if (!this.selectionMode) this.clearSelection();
+    this.render();
+  }
+
+  private clearSelection(): void { this.selectedUrls.clear(); }
+
+  private updateSelectionControls(): void {
+    for (const url of this.selectedUrls) if (!this.graph.nodes.has(url) || this.blacklisted.has(url)) this.selectedUrls.delete(url);
+    const selectedCount = this.selectedUrls.size;
+    this.multiSelect.textContent = this.selectionMode ? "退出多选" : "多选";
+    this.multiSelect.setAttribute("aria-pressed", String(this.selectionMode));
+    this.blacklistSelected.classList.toggle("hidden", !this.selectionMode);
+    this.blacklistSelected.disabled = this.bulkBlacklistPending || selectedCount === 0;
+    this.blacklistSelected.textContent = selectedCount ? `拉黑选中 (${selectedCount})` : "拉黑选中";
+  }
+
   private render(): void {
+    this.updateSelectionControls();
     this.tree.replaceChildren();
     if (this.graph.nodes.size === 0) {
       this.count.textContent = "0 项";
@@ -174,6 +210,17 @@ class IndexViewer {
     const row = document.createElement("div");
     row.className = "tree-row";
     row.style.setProperty("--depth", String(depth));
+    if (this.selectionMode) {
+      row.classList.add("selecting");
+      const checkbox = document.createElement("input");
+      checkbox.type = "checkbox";
+      checkbox.className = "select-checkbox";
+      checkbox.dataset.select = url;
+      checkbox.checked = this.selectedUrls.has(url);
+      checkbox.disabled = this.blacklisted.has(url) || this.bulkBlacklistPending;
+      checkbox.setAttribute("aria-label", `选择 ${title}`);
+      row.append(checkbox);
+    }
     const toggle = document.createElement("button");
     toggle.type = "button";
     toggle.className = "toggle";
@@ -201,6 +248,7 @@ class IndexViewer {
     blacklist.textContent = this.blacklisted.has(url) ? "↩" : "⊘";
     blacklist.title = this.blacklisted.has(url) ? "移出黑名单" : "加入黑名单";
     blacklist.setAttribute("aria-label", blacklist.title);
+    blacklist.disabled = this.bulkBlacklistPending;
     const actions = document.createElement("span");
     actions.className = "row-actions";
     actions.append(favorite, blacklist);
@@ -209,6 +257,8 @@ class IndexViewer {
   }
 
   private toggleBlacklist(entry: { url: string; title: string }): void {
+    if (this.bulkBlacklistPending) return;
+    this.selectedUrls.delete(entry.url);
     if (this.blacklisted.has(entry.url)) this.blacklisted.delete(entry.url);
     else {
       this.blacklisted.add(entry.url);
@@ -216,6 +266,30 @@ class IndexViewer {
     }
     void this.persist();
     this.render();
+  }
+
+  private async blacklistSelectedEntries(): Promise<void> {
+    if (this.bulkBlacklistPending) return;
+    const urls = [...this.selectedUrls].filter((url) => this.graph.nodes.has(url) && !this.blacklisted.has(url));
+    if (!urls.length || !window.confirm(`确定将选中的 ${urls.length} 项加入黑名单吗？`)) return;
+    const previous = this.blacklisted;
+    const previousSelection = new Set(this.selectedUrls);
+    this.bulkBlacklistPending = true;
+    this.blacklisted = new Set([...previous, ...urls]);
+    this.updateSelectionControls();
+    try {
+      await this.persist();
+      for (const url of urls) this.removeFromQueue(url);
+      this.selectedUrls.clear();
+      this.status.textContent = `已拉黑 ${urls.length} 项`;
+    } catch (error) {
+      this.blacklisted = previous;
+      this.selectedUrls = previousSelection;
+      this.status.textContent = error instanceof Error ? `黑名单保存失败：${error.message}` : "黑名单保存失败";
+    } finally {
+      this.bulkBlacklistPending = false;
+      this.render();
+    }
   }
 
   private removeFromQueue(url: string): void {

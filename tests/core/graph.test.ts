@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { childrenOf, createGraph, directChildren, graphEntries, hydrateGraph, markScopedNodesMissing, mergeEntries, markUnseenMissing, reconcileDirectoryChildren, serializeGraph, setNodeType } from "../../src/core/graph.js";
+import { childrenOf, createGraph, directChildren, graphEntries, hydrateGraph, markScopedNodesMissing, mergeEntries, markUnseenMissing, reconcileDirectoryChildren, removeNodes, serializeGraph, setNodeType } from "../../src/core/graph.js";
 import { queryNodes } from "../../src/core/query.js";
 
 describe("graph", () => {
@@ -115,5 +115,18 @@ describe("graph", () => {
       { url: "/dir/d", title: "D", type: "content" },
     ], "2026-08-20T00:00:00.000Z", false);
     expect(childrenOf(graph, "https://www.asmrgay.com/dir").map((node) => node.title)).toEqual(["A", "B", "C", "D"]);
+  });
+
+  it("removes selected nodes and cached descendants", () => {
+    const graph = createGraph();
+    mergeEntries(graph, "https://www.asmrgay.com/", [{ url: "/dir", title: "Dir", type: "directory" }]);
+    mergeEntries(graph, "https://www.asmrgay.com/dir", [{ url: "/dir/file.mp3", title: "File", type: "content" }]);
+    expect(removeNodes(graph, new Set(["https://www.asmrgay.com/dir"]))).toEqual(new Set([
+      "https://www.asmrgay.com/dir",
+      "https://www.asmrgay.com/dir/file.mp3",
+    ]));
+    expect(graph.nodes.has("https://www.asmrgay.com/dir")).toBe(false);
+    expect(graph.nodes.has("https://www.asmrgay.com/dir/file.mp3")).toBe(false);
+    expect(childrenOf(graph, "https://www.asmrgay.com/")).toEqual([]);
   });
 });

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createIndexExport, mergeEntryLists, parseIndexExport } from "../../src/core/schema.js";
+import { createIndexExport, MAX_IMPORT_ENTRIES, mergeEntryLists, parseIndexExport } from "../../src/core/schema.js";
 
 const origin = "https://www.asmrgay.com";
 
@@ -59,5 +59,11 @@ describe("index export schema", () => {
     };
     const exported = createIndexExport({ sourceOrigin: origin, rootPath: "/asmr", entries: [], favorites: new Set(), desktopState });
     expect(parseIndexExport(exported, origin).desktopState).toEqual(desktopState);
+  });
+
+  it("accepts exports up to the 50,000-entry scanner limit", () => {
+    const exported = createIndexExport({ sourceOrigin: origin, rootPath: "/", entries: [], favorites: new Set() });
+    const entry = { url: `${origin}/a`, title: "A", type: "content" as const };
+    expect(parseIndexExport({ ...exported, entries: Array(MAX_IMPORT_ENTRIES).fill(entry) }, origin).entries).toHaveLength(50_000);
   });
 });

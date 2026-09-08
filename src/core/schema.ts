@@ -2,7 +2,7 @@ import type { DiscoveredEntry, NodeType, SerializedGraph } from "./graph.js";
 import { normalizeUrl } from "./url.js";
 
 export const INDEX_SCHEMA_VERSION = 1;
-export const MAX_IMPORT_ENTRIES = 20_000;
+export const MAX_IMPORT_ENTRIES = 50_000;
 
 export interface IndexExport {
   schemaVersion: 1;

@@ -3,8 +3,9 @@
 ## Supported mode
 
 The desktop build targets Chrome/Edge with Tampermonkey on
-`https://www.asmrgay.com/`. It uses the verified same-origin AList JSON API and
-does not recursively or automatically scan the site.
+`https://www.asmrgay.com/`. It uses the verified same-origin AList JSON API.
+Normal browsing remains on demand; recursive scanning only starts after the user
+selects a root directory and presses the scan button.
 
 ## Request behavior
 
@@ -13,11 +14,22 @@ does not recursively or automatically scan the site.
 - `Load more` requests exactly the next page.
 - Cached pages are reused after reload.
 - `Refresh current directory` explicitly starts again at page 1.
+- `Automatic recursive scan` can walk a selected site directory breadth-first,
+  using a user-configured interval between directory requests (default 30
+  seconds) and saving a checkpoint after each completed directory.
+- Each directory scan follows AList pagination from page 1 until `total` is
+  reached or the 200-page safety cap is reached; page requests use the same
+  configured interval.
+- The automatic scan supports pause, continue, stop, and resume after reload.
+- If a directory still fails after the configured retries, the scan pauses and
+  keeps that directory at the front of the checkpoint queue; `Continue` retries
+  it. Rate-limit responses (429/Cloudflare 1015) still stop immediately.
 - Cloudflare Error 1015 stops immediately and is never automatically retried.
 
 ## Desktop features
 
 - Hierarchical on-demand browsing with breadcrumbs and cached pagination.
+- User-triggered recursive directory indexing with conservative throttling.
 - Search across loaded data and filters for directory, file, favorite, seen, and unseen.
 - Favorites and seen state stored in IndexedDB.
 - Manual directory/file reclassification for ambiguous entries.

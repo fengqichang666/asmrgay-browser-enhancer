@@ -15,6 +15,7 @@ export interface PersistedIndexState {
   blacklisted?: string[];
   failures?: FailureRecord[];
   checkpoint?: TreeScanCheckpoint;
+  autoScan?: { rootPath: string; intervalMs: number };
   graph?: SerializedGraph;
   loadedDirectories?: string[];
   directoryPagination?: Record<string, { nextPage: number; loaded: number; total: number; complete: boolean }>;

@@ -38,6 +38,8 @@ export interface TreeScanOptions {
   maxDepth?: number;
   maxNodes?: number;
   maxDirectories?: number;
+  directoryDelayMs?: number;
+  directoryJitterMs?: number;
   directoryOptions?: Omit<ScanDirectoryOptions, "signal" | "onProgress">;
   scanDirectory?: (
     path: string,
@@ -78,7 +80,7 @@ export class TreeScanController {
 
   async run(rootPath: string, options: TreeScanOptions = {}): Promise<TreeScanResult> {
     const maxDepth = clampInteger(options.maxDepth ?? 1, 1, 10);
-    const maxNodes = clampInteger(options.maxNodes ?? 2_000, 1, 20_000);
+    const maxNodes = clampInteger(options.maxNodes ?? 2_000, 1, 50_000);
     const maxDirectories = clampInteger(options.maxDirectories ?? 100, 1, 2_000);
     const scanDirectory = options.scanDirectory ?? scanAListDirectory;
     const resume = options.resumeFrom;
@@ -87,8 +89,8 @@ export class TreeScanController {
   const entries = new Map((resume?.entries ?? []).map((entry) => [entry.url, entry]));
     const failures: FailureRecord[] = [...(resume?.failures ?? [])];
     let directoriesScanned = resume?.directoriesScanned ?? 0;
-    let consecutiveDirectoryFailures = 0;
     let truncated = false;
+    let hasScannedDirectory = directoriesScanned > 0;
 
     while (frontier.length > 0 && !this.stopped) {
       await this.waitWhilePaused();
@@ -103,6 +105,20 @@ export class TreeScanController {
       visitedDirectories.add(current.path);
       this.emitProgress(options, "running", current.path, directoriesScanned, frontier.length, entries.size, maxDepth);
 
+      if (hasScannedDirectory) {
+        try {
+          await waitWithJitter(options.directoryDelayMs ?? 0, options.directoryJitterMs ?? 0, this.abortController.signal);
+        } catch (error) {
+          if (this.stopped || isAbortError(error)) {
+            visitedDirectories.delete(current.path);
+            frontier.unshift(current);
+            break;
+          }
+          throw error;
+        }
+      }
+
+      hasScannedDirectory = true;
       let result: ScanDirectoryResult;
       try {
         result = await scanDirectory(current.path, {
@@ -116,7 +132,14 @@ export class TreeScanController {
           frontier.unshift(current);
           break;
         }
-        consecutiveDirectoryFailures += 1;
+        if (isRateLimitError(error)) {
+          visitedDirectories.delete(current.path);
+          frontier.unshift(current);
+          truncated = true;
+          break;
+        }
+        visitedDirectories.delete(current.path);
+        frontier.unshift(current);
         failures.push({
           path: current.path,
           kind: "permanent",
@@ -124,15 +147,11 @@ export class TreeScanController {
           attempts: 1,
           occurredAt: new Date().toISOString(),
         });
-        directoriesScanned += 1;
+        this.paused = true;
+        this.emitProgress(options, "paused", current.path, directoriesScanned, frontier.length, entries.size, maxDepth);
         await this.emitCheckpoint(options, rootPath, maxDepth, maxNodes, maxDirectories, frontier, visitedDirectories, entries, failures, directoriesScanned);
-        if (consecutiveDirectoryFailures >= (options.directoryOptions?.circuitBreakerFailures ?? 5)) {
-          truncated = true;
-          break;
-        }
         continue;
       }
-      consecutiveDirectoryFailures = 0;
       directoriesScanned += 1;
       truncated ||= result.truncated;
 
@@ -273,4 +292,20 @@ function clampInteger(value: number, minimum: number, maximum: number): number {
 
 function isAbortError(error: unknown): boolean {
   return error instanceof DOMException && error.name === "AbortError";
+}
+
+function isRateLimitError(error: unknown): boolean {
+  return error instanceof Error && /Cloudflare\s+1015|rate limited|HTTP 429/i.test(error.message);
+}
+
+async function waitWithJitter(delayMs: number, jitterMs: number, signal: AbortSignal): Promise<void> {
+  const duration = Math.max(0, Math.trunc(delayMs)) + Math.floor(Math.random() * (Math.max(0, Math.trunc(jitterMs)) + 1));
+  if (duration === 0) return;
+  await new Promise<void>((resolve, reject) => {
+    const timeout = setTimeout(resolve, duration);
+    signal.addEventListener("abort", () => {
+      clearTimeout(timeout);
+      reject(signal.reason ?? new DOMException("扫描已停止", "AbortError"));
+    }, { once: true });
+  });
 }

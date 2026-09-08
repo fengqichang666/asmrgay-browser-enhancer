@@ -72,10 +72,11 @@ Build the Tampermonkey userscript for Chrome/Edge desktop:
 - New-tab opening must include `noopener,noreferrer` behavior.
 - Scan only same-origin HTTP(S) links and filter login, forms, scripts, external links,
   and obvious state-changing actions.
-- Do not start a recursive scan automatically and do not offer an all-site scan in the
-  mainline UI. Index directories on demand: expanding a directory fetches that single
-  directory, stores the result, and reuses the cached result until the user explicitly
-  refreshes that directory.
+- Do not start a recursive scan automatically. Keep the normal browsing path on demand:
+  expanding a directory fetches that single directory, stores the result, and reuses the
+  cached result until the user explicitly refreshes it. Also offer an explicitly started,
+  user-configured recursive scan from a selected site directory; it must remain
+  breadth-first, single-flight, throttled, pausable, stoppable, and checkpointed.
 - Keep requests single-directory, single-flight, and conservative. A visible refresh
   action is the only normal way to re-request an already loaded directory.
 - Apply the M0-derived minimum delay and random jitter between requests.

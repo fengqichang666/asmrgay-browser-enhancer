@@ -11,6 +11,7 @@ export {
   mergeEntries,
   repairGraphDisplayMetadata,
   reconcileDirectoryChildren,
+  removeNodes,
   serializeGraph,
   setNodeType,
 } from "./graph.js";

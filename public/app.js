@@ -171,7 +171,7 @@
 
   // src/core/schema.ts
   var INDEX_SCHEMA_VERSION = 1;
-  var MAX_IMPORT_ENTRIES = 2e4;
+  var MAX_IMPORT_ENTRIES = 5e4;
   function parseIndexExport(value, expectedOrigin) {
     if (!isRecord(value)) throw new Error("\u5BFC\u5165\u6587\u4EF6\u5FC5\u987B\u662F JSON \u5BF9\u8C61");
     if (value.schemaVersion !== INDEX_SCHEMA_VERSION) {
@@ -322,6 +322,8 @@
     search = requireElement("#search");
     filter = requireElement("#filter");
     file = requireElement("#file");
+    multiSelect = requireElement("#multi-select");
+    blacklistSelected = requireElement("#blacklist-selected");
     mode = requireElement("#mode");
     player = requireElement("#player");
     audio = requireElement("#audio");
@@ -338,12 +340,24 @@
     playbackMode = "single";
     queueIsFavorites = false;
     loadRequestId = 0;
+    selectionMode = false;
+    selectedUrls = /* @__PURE__ */ new Set();
+    bulkBlacklistPending = false;
     constructor() {
       requireElement("#import").addEventListener("click", () => this.file.click());
       this.file.addEventListener("change", (event) => void this.importFile(event));
-      this.search.addEventListener("input", () => this.render());
-      this.filter.addEventListener("change", () => this.render());
+      this.search.addEventListener("input", () => {
+        this.clearSelection();
+        this.render();
+      });
+      this.filter.addEventListener("change", () => {
+        this.clearSelection();
+        this.render();
+      });
+      this.multiSelect.addEventListener("click", () => this.toggleSelectionMode());
+      this.blacklistSelected.addEventListener("click", () => void this.blacklistSelectedEntries());
       this.tree.addEventListener("click", (event) => this.handleTreeClick(event));
+      this.tree.addEventListener("change", (event) => this.handleSelectionChange(event));
       requireElement("#play-favorites").addEventListener("click", () => this.playFavorites());
       requireElement("#player-close").addEventListener("click", () => this.closePlayer());
       requireElement("#player-prev").addEventListener("click", () => this.playRelative(-1));
@@ -421,7 +435,34 @@
       void this.persist();
       this.render();
     }
+    handleSelectionChange(event) {
+      const target = event.target;
+      if (!(target instanceof HTMLInputElement) || !target.matches("[data-select]")) return;
+      const url = target.dataset.select;
+      if (!url || target.disabled) return;
+      if (target.checked) this.selectedUrls.add(url);
+      else this.selectedUrls.delete(url);
+      this.updateSelectionControls();
+    }
+    toggleSelectionMode() {
+      this.selectionMode = !this.selectionMode;
+      if (!this.selectionMode) this.clearSelection();
+      this.render();
+    }
+    clearSelection() {
+      this.selectedUrls.clear();
+    }
+    updateSelectionControls() {
+      for (const url of this.selectedUrls) if (!this.graph.nodes.has(url) || this.blacklisted.has(url)) this.selectedUrls.delete(url);
+      const selectedCount = this.selectedUrls.size;
+      this.multiSelect.textContent = this.selectionMode ? "\u9000\u51FA\u591A\u9009" : "\u591A\u9009";
+      this.multiSelect.setAttribute("aria-pressed", String(this.selectionMode));
+      this.blacklistSelected.classList.toggle("hidden", !this.selectionMode);
+      this.blacklistSelected.disabled = this.bulkBlacklistPending || selectedCount === 0;
+      this.blacklistSelected.textContent = selectedCount ? `\u62C9\u9ED1\u9009\u4E2D (${selectedCount})` : "\u62C9\u9ED1\u9009\u4E2D";
+    }
     render() {
+      this.updateSelectionControls();
       this.tree.replaceChildren();
       if (this.graph.nodes.size === 0) {
         this.count.textContent = "0 \u9879";
@@ -468,6 +509,17 @@
       const row = document.createElement("div");
       row.className = "tree-row";
       row.style.setProperty("--depth", String(depth));
+      if (this.selectionMode) {
+        row.classList.add("selecting");
+        const checkbox = document.createElement("input");
+        checkbox.type = "checkbox";
+        checkbox.className = "select-checkbox";
+        checkbox.dataset.select = url;
+        checkbox.checked = this.selectedUrls.has(url);
+        checkbox.disabled = this.blacklisted.has(url) || this.bulkBlacklistPending;
+        checkbox.setAttribute("aria-label", `\u9009\u62E9 ${title}`);
+        row.append(checkbox);
+      }
       const toggle = document.createElement("button");
       toggle.type = "button";
       toggle.className = "toggle";
@@ -506,6 +558,7 @@
       blacklist.textContent = this.blacklisted.has(url) ? "\u21A9" : "\u2298";
       blacklist.title = this.blacklisted.has(url) ? "\u79FB\u51FA\u9ED1\u540D\u5355" : "\u52A0\u5165\u9ED1\u540D\u5355";
       blacklist.setAttribute("aria-label", blacklist.title);
+      blacklist.disabled = this.bulkBlacklistPending;
       const actions = document.createElement("span");
       actions.className = "row-actions";
       actions.append(favorite, blacklist);
@@ -513,6 +566,8 @@
       return row;
     }
     toggleBlacklist(entry) {
+      if (this.bulkBlacklistPending) return;
+      this.selectedUrls.delete(entry.url);
       if (this.blacklisted.has(entry.url)) this.blacklisted.delete(entry.url);
       else {
         this.blacklisted.add(entry.url);
@@ -520,6 +575,29 @@
       }
       void this.persist();
       this.render();
+    }
+    async blacklistSelectedEntries() {
+      if (this.bulkBlacklistPending) return;
+      const urls = [...this.selectedUrls].filter((url) => this.graph.nodes.has(url) && !this.blacklisted.has(url));
+      if (!urls.length || !window.confirm(`\u786E\u5B9A\u5C06\u9009\u4E2D\u7684 ${urls.length} \u9879\u52A0\u5165\u9ED1\u540D\u5355\u5417\uFF1F`)) return;
+      const previous = this.blacklisted;
+      const previousSelection = new Set(this.selectedUrls);
+      this.bulkBlacklistPending = true;
+      this.blacklisted = /* @__PURE__ */ new Set([...previous, ...urls]);
+      this.updateSelectionControls();
+      try {
+        await this.persist();
+        for (const url of urls) this.removeFromQueue(url);
+        this.selectedUrls.clear();
+        this.status.textContent = `\u5DF2\u62C9\u9ED1 ${urls.length} \u9879`;
+      } catch (error) {
+        this.blacklisted = previous;
+        this.selectedUrls = previousSelection;
+        this.status.textContent = error instanceof Error ? `\u9ED1\u540D\u5355\u4FDD\u5B58\u5931\u8D25\uFF1A${error.message}` : "\u9ED1\u540D\u5355\u4FDD\u5B58\u5931\u8D25";
+      } finally {
+        this.bulkBlacklistPending = false;
+        this.render();
+      }
     }
     removeFromQueue(url) {
       const removedIndex = this.queue.findIndex((item) => item.url === url);

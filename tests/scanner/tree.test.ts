@@ -72,4 +72,46 @@ describe("TreeScanController", () => {
     const resumed = await new TreeScanController().run("/", { maxDepth: 2, scanDirectory, resumeFrom: first.checkpoint! });
     expect(resumed.directoriesScanned).toBe(3);
   });
+
+  it("waits between directory requests when a delay is configured", async () => {
+    const times: number[] = [];
+    const scanDirectory = vi.fn(async (path: string) => {
+      times.push(Date.now());
+      return result(path, path === "/"
+        ? [{ url: "https://www.asmrgay.com/a", title: "A", type: "directory" }]
+        : []);
+    });
+    await new TreeScanController().run("/", {
+      maxDepth: 2,
+      directoryDelayMs: 20,
+      directoryJitterMs: 0,
+      scanDirectory,
+    });
+    expect(times).toHaveLength(2);
+    expect(times[1]! - times[0]!).toBeGreaterThanOrEqual(18);
+  });
+
+  it("pauses and keeps a failed directory for continue", async () => {
+    const states: string[] = [];
+    let childAttempts = 0;
+    const controller = new TreeScanController();
+    const scanDirectory = vi.fn(async (path: string) => {
+      if (path === "/") return result(path, [{ url: "https://www.asmrgay.com/a", title: "A", type: "directory" }]);
+      childAttempts += 1;
+      if (childAttempts === 1) throw new Error("temporary directory failure");
+      return result(path, []);
+    });
+    const running = controller.run("/", {
+      maxDepth: 2,
+      directoryOptions: { maxRetries: 0 },
+      scanDirectory,
+      onProgress: (progress) => states.push(progress.state),
+    });
+    await vi.waitFor(() => expect(states).toContain("paused"));
+    controller.resume();
+    const resumed = await running;
+    expect(scanDirectory.mock.calls.map(([path]) => path)).toEqual(["/", "/a", "/a"]);
+    expect(resumed.failures).toHaveLength(1);
+    expect(resumed.stopped).toBe(false);
+  });
 });

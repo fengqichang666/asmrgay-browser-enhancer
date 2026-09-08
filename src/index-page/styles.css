@@ -10,14 +10,17 @@ h1 { margin: 0; font-size: 19px; }
 .status { min-width: 0; color: #68727d; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .toolbar { flex-wrap: wrap; }
 .toolbar button { border: 0; border-radius: 7px; background: #1769aa; color: #fff; padding: 8px 12px; }
+.toolbar button:disabled { opacity: .55; cursor: default; }
 .toolbar select, .search-row input, .search-row select { min-height: 38px; border: 1px solid #bcc5cf; border-radius: 7px; background: #fff; padding: 7px 9px; }
 .search-row { margin-top: 9px; }
 .search-row input { flex: 1; min-width: 0; }
 .count { white-space: nowrap; color: #5d6670; font-size: 13px; }
 .tree { padding-bottom: 30px; }
 .tree-row { --depth: 0; display: grid; grid-template-columns: 34px minmax(0, 1fr) 84px; align-items: center; min-height: 58px; padding: 5px 8px 5px calc(8px + var(--depth) * 19px); border-bottom: 1px solid #e7eaed; content-visibility: auto; contain-intrinsic-size: 58px; }
+.tree-row.selecting { grid-template-columns: 20px 34px minmax(0, 1fr) 84px; }
 .tree-row:hover { background: #f3f7fa; }
 .toggle, .favorite, .blacklist { border: 0; background: transparent; cursor: pointer; }
+.select-checkbox { width: 16px; height: 16px; margin: 0; }
 .toggle { width: 34px; height: 40px; color: #64717d; font-size: 18px; }
 .toggle:disabled { cursor: default; }
 .tree-row a { min-width: 0; color: #155f9c; text-decoration: none; }
