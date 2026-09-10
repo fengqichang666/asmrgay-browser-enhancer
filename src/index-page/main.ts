@@ -162,11 +162,13 @@ class IndexViewer {
   }
 
   private render(): void {
+    const scrollTop = window.scrollY;
     this.updateSelectionControls();
     this.tree.replaceChildren();
     if (this.graph.nodes.size === 0) {
       this.count.textContent = "0 项";
       this.tree.append(emptyState("请先导入桌面端导出的 index.json"));
+      restoreScroll(scrollTop);
       return;
     }
     const query = this.search.value.trim().toLocaleLowerCase();
@@ -183,6 +185,7 @@ class IndexViewer {
       for (const entry of matches.slice(0, MAX_SEARCH_RESULTS)) fragment.append(this.createRow(entry.url, entry.title, entry.type, 0, false));
       if (matches.length > MAX_SEARCH_RESULTS) fragment.append(emptyState(`仅显示前 ${MAX_SEARCH_RESULTS} 项，请继续缩小搜索范围`));
       this.tree.append(fragment);
+      restoreScroll(scrollTop);
       return;
     }
     const rootUrl = new URL(encodePath(this.rootPath), this.sourceOrigin).href;
@@ -204,6 +207,7 @@ class IndexViewer {
     visit(rootUrl, 0, new Set([rootUrl]));
     this.count.textContent = `${visibleCount} 项`;
     this.tree.append(fragment.childNodes.length ? fragment : emptyState("索引中没有当前根目录的子项"));
+    restoreScroll(scrollTop);
   }
 
   private createRow(url: string, title: string, type: "directory" | "content", depth: number, expanded: boolean): HTMLElement {
@@ -458,6 +462,7 @@ function readSourceOrigin(value: unknown): string { if (typeof value !== "object
 function encodePath(path: string): string { return path.split("/").map((segment) => encodeURIComponent(segment)).join("/"); }
 function emptyState(message: string): HTMLElement { const element = document.createElement("div"); element.className = "empty"; element.textContent = message; return element; }
 function requireElement<T extends Element = HTMLElement>(selector: string): T { const element = document.querySelector<T>(selector); if (!element) throw new Error(`Missing element: ${selector}`); return element; }
+function restoreScroll(scrollTop: number): void { requestAnimationFrame(() => window.scrollTo(0, scrollTop)); }
 function randomIndex(length: number, current: number): number { if (length < 2) return current; let next = current; while (next === current) next = Math.floor(Math.random() * length); return next; }
 async function resolveMediaUrl(fileUrl: string, sourceOrigin: string): Promise<string> {
   const path = decodeURIComponent(new URL(fileUrl).pathname);

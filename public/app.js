@@ -462,11 +462,13 @@
       this.blacklistSelected.textContent = selectedCount ? `\u62C9\u9ED1\u9009\u4E2D (${selectedCount})` : "\u62C9\u9ED1\u9009\u4E2D";
     }
     render() {
+      const scrollTop = window.scrollY;
       this.updateSelectionControls();
       this.tree.replaceChildren();
       if (this.graph.nodes.size === 0) {
         this.count.textContent = "0 \u9879";
         this.tree.append(emptyState("\u8BF7\u5148\u5BFC\u5165\u684C\u9762\u7AEF\u5BFC\u51FA\u7684 index.json"));
+        restoreScroll(scrollTop);
         return;
       }
       const query = this.search.value.trim().toLocaleLowerCase();
@@ -483,6 +485,7 @@
         for (const entry of matches.slice(0, MAX_SEARCH_RESULTS)) fragment2.append(this.createRow(entry.url, entry.title, entry.type, 0, false));
         if (matches.length > MAX_SEARCH_RESULTS) fragment2.append(emptyState(`\u4EC5\u663E\u793A\u524D ${MAX_SEARCH_RESULTS} \u9879\uFF0C\u8BF7\u7EE7\u7EED\u7F29\u5C0F\u641C\u7D22\u8303\u56F4`));
         this.tree.append(fragment2);
+        restoreScroll(scrollTop);
         return;
       }
       const rootUrl = new URL(encodePath(this.rootPath), this.sourceOrigin).href;
@@ -504,6 +507,7 @@
       visit(rootUrl, 0, /* @__PURE__ */ new Set([rootUrl]));
       this.count.textContent = `${visibleCount} \u9879`;
       this.tree.append(fragment.childNodes.length ? fragment : emptyState("\u7D22\u5F15\u4E2D\u6CA1\u6709\u5F53\u524D\u6839\u76EE\u5F55\u7684\u5B50\u9879"));
+      restoreScroll(scrollTop);
     }
     createRow(url, title, type, depth, expanded) {
       const row = document.createElement("div");
@@ -781,6 +785,9 @@
     const element = document.querySelector(selector);
     if (!element) throw new Error(`Missing element: ${selector}`);
     return element;
+  }
+  function restoreScroll(scrollTop) {
+    requestAnimationFrame(() => window.scrollTo(0, scrollTop));
   }
   function randomIndex(length, current) {
     if (length < 2) return current;
